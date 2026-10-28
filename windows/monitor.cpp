@@ -44,13 +44,13 @@ void show_notice(DWORD pid){
     DWORD result=0;WTSSendMessageW(WTS_CURRENT_SERVER_HANDLE,session,title,static_cast<DWORD>(wcslen(title)*sizeof(wchar_t)),message,static_cast<DWORD>(wcslen(message)*sizeof(wchar_t)),MB_OK|MB_ICONINFORMATION,15,&result,FALSE);
 }
 }
-std::vector<std::string> stop_matching_processes(const std::vector<std::string>& blocked){
+std::vector<std::string> stop_matching_processes(const std::vector<std::string>& blocked,DWORD only_pid){
     std::vector<std::string> stopped;if(blocked.empty())return stopped;
     handle snapshot{CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};if(snapshot.h==INVALID_HANDLE_VALUE)return stopped;
     PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);
     if(!Process32FirstW(snapshot.h,&entry))return stopped;
     do {
-        DWORD pid=entry.th32ProcessID;if(pid==0||pid==4||pid==GetCurrentProcessId())continue;
+        DWORD pid=entry.th32ProcessID;if((only_pid&&pid!=only_pid)||pid==0||pid==4||pid==GetCurrentProcessId())continue;
         handle proc{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_TERMINATE,FALSE,pid)};if(!proc.h)continue;
         std::vector<wchar_t> path(32768);DWORD length=static_cast<DWORD>(path.size());
         if(!QueryFullProcessImageNameW(proc.h,0,path.data(),&length))continue;
