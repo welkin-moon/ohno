@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <ctime>
 #include <map>
+#include <set>
 #include "../src/json.hpp"
 #include "../src/smbios.hpp"
 #pragma comment(lib, "winhttp.lib")
@@ -67,10 +68,24 @@ identity get_identity(){
     const std::string stored=utf8(read_string(key.h,L"Credentials"));
     if(stored.size()==130&&stored[32]==':'&&stored[65]==':'&&stored.substr(0,32)==anchor)
         return {stored.substr(33,32),stored.substr(66,64)};
+    if(!clear_edge_policy())throw std::runtime_error("cannot clear copied browser policy");
+    RegDeleteValueW(key.h,L"Policy"); // copied policies and grants must not follow cloned credentials
     auto newid=random_hex(16),newkey=random_hex(32);
     // A single registry value avoids persisting a partial id/key/anchor update.
     write_string(key.h,L"Credentials",wide_ascii(anchor+":"+newid+":"+newkey));
     return {newid,newkey};
+}
+std::string cached_policy(){
+    reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};
+    DWORD type=0,size=0;if(RegQueryValueExW(key.h,L"Policy",nullptr,&type,nullptr,&size)!=ERROR_SUCCESS||type!=REG_BINARY||size>1024*1024)return {};
+    std::string s(size,'\0');if(RegQueryValueExW(key.h,L"Policy",nullptr,&type,reinterpret_cast<BYTE*>(s.data()),&size)!=ERROR_SUCCESS||type!=REG_BINARY)return {};s.resize(size);return s;
+}
+void save_policy(const std::string& value){
+    reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,KEY_WRITE,&key.h)!=ERROR_SUCCESS)throw std::runtime_error("policy key");
+    if(RegSetValueExW(key.h,L"Policy",0,REG_BINARY,reinterpret_cast<const BYTE*>(value.data()),static_cast<DWORD>(value.size()))!=ERROR_SUCCESS)throw std::runtime_error("policy save");
+}
+void validate_policy(const ohno_json::value& p){
+    if(p.at("program_hashes").type!=ohno_json::value::kind::array||p.at("grants").type!=ohno_json::value::kind::array||p.at("web_domains").type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
 }
 std::wstring get_server(){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};
@@ -96,44 +111,55 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
 }
 }
 void run_agent(HANDLE stop_event){
-    std::map<std::string, ULONGLONG> last_request;
+    std::map<std::string,ULONGLONG> last_request;
+    std::set<std::string> queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
-            auto ident=get_identity();wchar_t name[MAX_COMPUTERNAME_LENGTH+1]{};DWORD n=MAX_COMPUTERNAME_LENGTH+1;
-            std::wstring pc=GetComputerNameW(name,&n)?std::wstring(name,n):L"unknown";
-            std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+"}";
-            auto reg=request(server,L"POST",L"/api/device/register",L"Content-Type: application/json\r\n",data);
-            if(reg.status==200||reg.status==201){
-                auto result=ohno_json::parse(reg.body);const auto& approved=result.at("approved");
-                if(approved.type==ohno_json::value::kind::boolean&&approved.boolean){
-                    auto h=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\n";
-                    auto policy=request(server,L"GET",L"/api/device/policy",h,{});
-                    if(policy.status==200){
-                        auto p=ohno_json::parse(policy.body);
-                        const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");
-                        if(rules.type!=ohno_json::value::kind::array||grants.type!=ohno_json::value::kind::array||web.type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
-                        std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
-                        if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
-                        std::vector<std::string> blocked;
-                        for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
-                        for(const auto& grant:grants.items){
-                            const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
-                            if(kind.type==ohno_json::value::kind::string&&kind.text=="application"&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
-                                try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr)))blocked.erase(std::remove(blocked.begin(),blocked.end(),object.text),blocked.end());}catch(const std::exception&){}
-                            }
-                        }
-                        for(const auto& hash:stop_matching_processes(blocked)){
-                            auto now=GetTickCount64();auto it=last_request.find(hash);
-                            if(it!=last_request.end()&&now-it->second<60000)continue;
-                            last_request[hash]=now;
-                            auto body="{\"kind\":\"application\",\"object\":"+quoted(hash)+"}";
-                            request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
-                        }
+            auto ident=get_identity();auto policy_text=cached_policy();bool online=false;
+            auto h=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\n";
+            try{
+                wchar_t name[MAX_COMPUTERNAME_LENGTH+1]{};DWORD n=MAX_COMPUTERNAME_LENGTH+1;
+                std::wstring pc=GetComputerNameW(name,&n)?std::wstring(name,n):L"unknown";
+                std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+"}";
+                auto reg=request(server,L"POST",L"/api/device/register",L"Content-Type: application/json\r\n",data);
+                if(reg.status==200||reg.status==201){
+                    auto result=ohno_json::parse(reg.body);const auto& approved=result.at("approved");
+                    if(approved.type!=ohno_json::value::kind::boolean)throw std::runtime_error("invalid registration response");
+                    if(!approved.boolean)debug(L"ohno: device pending approval\n");
+                    else{
+                        auto policy=request(server,L"GET",L"/api/device/policy",h,{});
+                        if(policy.status==200){auto candidate=ohno_json::parse(policy.body);validate_policy(candidate);save_policy(policy.body);policy_text=policy.body;online=true;}
+                        else if(policy.status==403)debug(L"ohno: device approval revoked\n");
                     }
                 }
+            }catch(const std::exception&){debug(L"ohno: offline; applying cached policy\n");}
+            if(!policy_text.empty()){
+                auto p=ohno_json::parse(policy_text);validate_policy(p);
+                const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");
+                std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
+                if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
+                std::vector<std::string> blocked;for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
+                if(online)for(const auto& grant:grants.items){
+                    const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
+                    if(kind.type==ohno_json::value::kind::string&&kind.text=="application"&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
+                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr)))blocked.erase(std::remove(blocked.begin(),blocked.end(),object.text),blocked.end());}catch(const std::exception&){}
+                    }
+                }
+                for(const auto& hash:stop_matching_processes(blocked)){
+                    auto now=GetTickCount64();auto it=last_request.find(hash);
+                    if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert(hash);}
+                }
             }
-        }catch(const std::exception&){debug(L"ohno: registration or polling failed; retrying\n");}
+            if(online){
+                for(auto it=queued.begin();it!=queued.end();){
+                    try{auto body="{\"kind\":\"application\",\"object\":"+quoted(*it)+"}";
+                        auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
+                        if(response.status==201)it=queued.erase(it);else break;
+                    }catch(const std::exception&){break;}
+                }
+            }
+        }catch(const std::exception&){debug(L"ohno: service iteration failed\n");}
         if(WaitForSingleObject(stop_event,15000)!=WAIT_TIMEOUT)break;
     }
 }
