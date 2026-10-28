@@ -119,6 +119,7 @@ std::string machine_anchor(const std::vector<std::string>& macs){
 identity get_identity(){
     std::lock_guard<std::mutex> lock(identity_mutex);
     const auto macs=network_macs();
+    if(macs.empty())throw std::runtime_error("No usable network adapter MAC");
     const auto anchor=machine_anchor(macs);
     PSECURITY_DESCRIPTOR sd=nullptr;
     if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;KA;;;SY)(A;;KA;;;BA)",SDDL_REVISION_1,&sd,nullptr))throw std::runtime_error("security descriptor");
