@@ -24,6 +24,7 @@ HOSTNAME = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[A-Za-z0-9_-]{16,128}\Z')
 PROGRAM_NAME = re.compile(r'[a-z0-9_. -]{1,128}\.exe\Z')
+DEFAULT_WEB = ['classic.minecraft.net', 'eaglercraft.com']
 DEFAULT_GAMES = ['plantsvszombies.exe','plantsvszombiesoriginal.exe','slaythespire.exe','gta3.exe','gta-vc.exe','gta_sa.exe','gtaiv.exe','minecraftlauncher.exe','minecraft.windows.exe']
 
 
@@ -55,7 +56,7 @@ class Store:
         p.parent.mkdir(parents=True, exist_ok=True)
         salt = secrets.token_hex(16)
         state = {'version': 1, 'salt': salt, 'password_hash': password_hash(password, salt),
-                 'policy_revision': 0, 'web_domains': [], 'program_hashes': [], 'program_names': DEFAULT_GAMES[:],
+                 'policy_revision': 0, 'web_domains': DEFAULT_WEB[:], 'program_hashes': [], 'program_names': DEFAULT_GAMES[:],
                  'devices': {}, 'requests': []}
         # Exclusive creation prevents accidental overwrite.
         fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -205,6 +206,7 @@ class Handler(BaseHTTPRequestHandler):
         content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><button>保存规则</button></form></section>'
         content += '<section><h2>设备</h2><table><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
+        content += '<p><small>ohno 是自由软件：<a href="https://github.com/welkin-moon/ohno">查看源码与许可证</a></small></p>'
         return self.page('ohno 教师端', content)
 
     def do_POST(self):

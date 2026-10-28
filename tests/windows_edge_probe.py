@@ -35,9 +35,11 @@ def main():
             winreg.SetValueEx(browser_key,'1',0,winreg.REG_SZ,'localhost')
             blocked=run(url,1)
             if MARKER in blocked:raise RuntimeError('Edge URLBlocklist did not block localhost')
+            if '<html' not in blocked.lower():raise RuntimeError('Blocked page could not be distinguished from browser failure')
             print('Edge domain policy blocked the local page')
             local=Path(tmp)/'local.html';local.write_text('<title>'+MARKER+'</title>',encoding='utf-8')
             local_url=local.as_uri()
+            if MARKER not in run(local_url,9):raise RuntimeError('Baseline local file did not load in Edge')
             for i,pattern in enumerate(['file://*','file:///*','file:*'],2):
                 winreg.SetValueEx(browser_key,'1',0,winreg.REG_SZ,pattern)
                 output=run(local_url,i)
