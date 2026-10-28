@@ -34,6 +34,10 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_test.cpp windows\request_pipe.cpp src\policy.cpp /Fe:pipe-test.exe advapi32.lib
+          if errorlevel 1 exit /b 1
+          pipe-test.exe
+          if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp /Fe:pipe-client.exe
           if errorlevel 1 exit /b 1
           rc /fo setup.res windows\setup.rc
