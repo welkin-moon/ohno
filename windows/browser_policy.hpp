@@ -6,3 +6,5 @@
 bool apply_browser_policy_at(HKEY root,const std::wstring& target,const std::wstring& tracker,const std::vector<std::string>& domains);
 bool apply_edge_policy(const std::vector<std::string>& domains);
 bool clear_edge_policy();
+bool apply_edge_allow_policy(const std::vector<std::string>& domains);
+bool clear_edge_allow_policy();

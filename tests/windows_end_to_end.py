@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import winreg
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -64,7 +65,7 @@ def main():
             csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
             form('/device',{'csrf':csrf,'id':device,'approved':'1'},cookie)
             file_hash=hashlib.sha256(target.read_bytes()).hexdigest()
-            form('/policy',{'csrf':csrf,'domains':'','hashes':file_hash,'names':''},cookie)
+            form('/policy',{'csrf':csrf,'domains':'game.example','hashes':file_hash,'names':''},cookie)
             child=subprocess.Popen([str(target)])
             waitfor(lambda:child.poll() is not None,120)
             request=waitfor(lambda:next((x for x in read()['requests'] if x['object']==file_hash),None),90)
@@ -74,7 +75,16 @@ def main():
             time.sleep(20)
             if child.poll() is not None:raise RuntimeError('approved target was stopped')
             child.terminate();child.wait(timeout=5);child=None
-            print('Windows service-to-teacher approval test passed')
+            subprocess.run([str(root/'pipe-client.exe'),'game.example'],check=True)
+            website=waitfor(lambda:next((x for x in read()['requests'] if x['kind']=='website' and x['object']=='game.example'),None),90)
+            form('/request',{'csrf':csrf,'id':website['id'],'action':'approve'},cookie)
+            def allowed_site():
+                path=r'SOFTWARE\Policies\Microsoft\Edge\URLAllowlist'
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
+                    count=winreg.QueryInfoKey(registry)[1]
+                    return any(winreg.EnumValue(registry,i)[1]=='.game.example' for i in range(count))
+            waitfor(allowed_site,90)
+            print('Windows service-to-teacher application and website approval tests passed')
         finally:
             cleanup_failed=False
             if child and child.poll() is None:child.terminate();child.wait(timeout=5)

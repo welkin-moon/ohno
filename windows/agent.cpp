@@ -10,12 +10,14 @@
 #include "monitor.hpp"
 #include "browser_policy.hpp"
 #include "network_filter.hpp"
+#include "request_pipe.hpp"
 #include <algorithm>
 #include <ctime>
 #include <map>
 #include <set>
 #include "../src/json.hpp"
 #include "../src/smbios.hpp"
+#include "../src/policy.hpp"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -69,7 +71,7 @@ identity get_identity(){
     const std::string stored=utf8(read_string(key.h,L"Credentials"));
     if(stored.size()==130&&stored[32]==':'&&stored[65]==':'&&stored.substr(0,32)==anchor)
         return {stored.substr(33,32),stored.substr(66,64)};
-    if(!clear_edge_policy())throw std::runtime_error("cannot clear copied browser policy");
+    if(!clear_edge_policy()||!clear_edge_allow_policy())throw std::runtime_error("cannot clear copied browser policy");
     RegDeleteValueW(key.h,L"Policy"); // copied policies and grants must not follow cloned credentials
     auto newid=random_hex(16),newkey=random_hex(32);
     // A single registry value avoids persisting a partial id/key/anchor update.
@@ -112,11 +114,16 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
 }
 }
 void run_agent(HANDLE stop_event){
+    RequestPipe website_requests(stop_event);
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
     std::set<std::string> queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
+        for(const auto& host:website_requests.take()){
+            auto name="W:"+host;auto now=GetTickCount64();auto it=last_request.find(name);
+            if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;queued.insert(name);}
+        }
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
             auto ident=get_identity();auto policy_text=cached_policy();bool online=false;
@@ -144,14 +151,15 @@ void run_agent(HANDLE stop_event){
                 if(p.at("block_local_files").boolean)domains.push_back("file://*");
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 std::vector<std::string> names;for(const auto& item:name_rules.items)if(item.type==ohno_json::value::kind::string)names.push_back(item.text);
-                std::vector<std::string> allowed,network_allowed;
+                std::vector<std::string> allowed,network_allowed,site_allowed;
                 std::vector<std::string> blocked;for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
                 if(online)for(const auto& grant:grants.items){
                     const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
                     if(kind.type==ohno_json::value::kind::string&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
-                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr))){if(kind.text=="application")allowed.push_back(object.text);else if(kind.text=="network")network_allowed.push_back(object.text);}}catch(const std::exception&){}
+                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr))){if(kind.text=="application")allowed.push_back(object.text);else if(kind.text=="network")network_allowed.push_back(object.text);else if(kind.text=="website"&&ohno::valid_hostname(object.text))site_allowed.push_back("."+object.text);}}catch(const std::exception&){}
                     }
                 }
+                if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
                 for(const auto& hash:stop_matching_processes(blocked,names,allowed)){
                     auto now=GetTickCount64();auto it=last_request.find(hash);
                     if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert("A:"+hash);}
@@ -167,7 +175,7 @@ void run_agent(HANDLE stop_event){
             }
             if(online){
                 for(auto it=queued.begin();it!=queued.end();){
-                    try{auto kind=it->substr(0,2)=="N:"?"network":"application";auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(it->substr(2))+"}";
+                    try{auto prefix=it->substr(0,2);auto kind=prefix=="N:"?"network":prefix=="W:"?"website":"application";auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(it->substr(2))+"}";
                         auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
                         if(response.status==201)it=queued.erase(it);else break;
                     }catch(const std::exception&){break;}

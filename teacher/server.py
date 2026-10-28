@@ -290,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
         kind, obj = data.get('kind'), data.get('object')
         if not isinstance(kind, str) or kind not in ('website', 'application', 'network', 'local_html') or not isinstance(obj, str) or not 1 <= len(obj) <= 512:
             return self.json_reply(400, {'error': 'invalid request'})
+        if (kind == 'website' and not HOSTNAME.fullmatch(obj)) or (kind in ('application','network') and not HASH.fullmatch(obj)):
+            return self.json_reply(400, {'error': 'invalid object identity'})
         with self.store.lock:
             if not self.store.device(dev_id, key):
                 return self.json_reply(403, {'error': 'device not authorized'})

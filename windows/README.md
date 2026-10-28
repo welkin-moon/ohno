@@ -11,7 +11,7 @@
 在仓库根目录的 Visual Studio x64 开发者命令行中，使用 Windows SDK 编译：
 
 ```
-cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
+cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
 ```
 
 构建需要编译器及 SDK，成品运行时按 `/MT` 静态链接 C/C++ 运行库，不需要另装 .NET 或 Visual C++ 再发行包。精简系统可能缺失 Windows 自身的基础组件，必须通过实机检查和测试。
@@ -20,7 +20,7 @@ cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp wind
 
 服务从注册表 `HKLM\SOFTWARE\Ohno` 的字符串值 `ServerUrl` 读取教师端 HTTPS 根地址，使用系统证书信任链；设备凭据在本机系统注册表生成，教师批准后开始轮询。原型会在硬件 SMBIOS UUID 改变时重建设备凭据并请求审批；UUID 不存在时拒绝注册。尚未验证兆芯机器的 UUID 是否存在且唯一，因此仍不能用于实际镜像分发。
 
-进程检测存在启动后至扫描前的时间窗口，拒绝执行可能失败，不能作为恶意程序防护。网站规则通过 Edge 的 URLBlocklist 试验性应用，只覆盖受此策略管理的 Edge；不会显示自定义提示或生成网页申请。来源联网限制仅有不完整的试验性实现。教师可选择对 Edge 尝试限制所有本地文件；它可能影响 PDF 和课件，且无法保证覆盖全部本地 HTML。
+进程检测存在启动后至扫描前的时间窗口，拒绝执行可能失败，不能作为恶意程序防护。网站规则通过 Edge 的 URLBlocklist 试验性应用，只覆盖受此策略管理的 Edge；不会显示自定义提示；网站申请需要通过桌面快捷方式手动发起。来源联网限制仅有不完整的试验性实现。教师可选择对 Edge 尝试限制所有本地文件；它可能影响 PDF 和课件，且无法保证覆盖全部本地 HTML。
 
 ## 安装器试验代码
 
@@ -29,3 +29,5 @@ cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp wind
 策略在成功下载后缓存在受限注册表中；服务器离线时尝试继续执行缓存规则，但不沿用临时放行。若设备身份因硬件变化重建，会先清除本程序记录的 Edge 规则和缓存。断网期间的游戏申请只暂存在内存，重启服务后可能丢失。该机制尚需完整集成测试。
 
 程序联网限制有实验性实现：周期性检查运行中的可执行文件，识别 NTFS 下载区域标记或当前可移动磁盘路径，并在 WFP 对该程序添加 IPv4/IPv6 出站连接阻断规则；教师可对哈希临时放行。**这不是可靠的防病毒功能**：扫描前已有连接可能发生；来源标记可以丢失；U 盘文件复制后可能失去来源；脚本/共享运行时及代理进程的联网不能可靠归属；服务停止时动态规则消失。仅供受控测试。
+
+安装器会创建“ohno website request”公共桌面快捷方式。学生输入域名后，本机服务向教师端提交网站申请；教师批准后试验性地通过 Edge URLAllowlist 对该设备精确放行，过期或离线后移除。请求与放行目前只覆盖 Edge；服务重启时未同步的请求会丢失。
