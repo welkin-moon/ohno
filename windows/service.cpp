@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdio>
+#include <cwchar>
 #include "agent.hpp"
 namespace {
 constexpr wchar_t service_name[] = L"OhnoPrototype";
