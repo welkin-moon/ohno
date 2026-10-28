@@ -1,7 +1,7 @@
 name: Prototype checks
 on:
   push:
-    branches: [work/first-version]
+    branches: [work/first-version, main]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -9,6 +9,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,6 +23,7 @@ jobs:
         run: make test
   windows-build:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Fetch pinned TUN engine
@@ -124,8 +126,41 @@ jobs:
           if errorlevel 1 exit /b 1
           dist\ohno-teacher.exe --generate-certificate --host localhost --cert %TEMP%\ohno-cert.pem --key %TEMP%\ohno-key.pem
           if errorlevel 1 exit /b 1
+          python tests\collect_licenses.py
+          if errorlevel 1 exit /b 1
       - name: Upload teacher prototype
         uses: actions/upload-artifact@v4
         with:
           name: ohno-teacher-prototype-windows-x64
-          path: dist/ohno-teacher.exe
+          path: |
+            dist/ohno-teacher.exe
+            dist/licenses
+  publish-prerelease:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [linux, windows-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ohno-client-prototype-windows-x64
+          path: release/client
+      - uses: actions/download-artifact@v4
+        with:
+          name: ohno-teacher-prototype-windows-x64
+          path: release/teacher
+      - name: Package and publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp docs/trial-guide.md release/client/trial-guide.md
+          cp docs/trial-guide.md release/teacher/trial-guide.md
+          cp LICENSE release/client/AGPL-3.0.txt
+          cp LICENSE release/teacher/AGPL-3.0.txt
+          cp windows/sing-box-LICENSE.txt release/client/sing-box-LICENSE.txt
+          cp windows/wintun-LICENSE.txt release/client/wintun-LICENSE.txt
+          (cd release/client && zip -q ../ohno-client-windows-x64.zip ohno-setup.exe trial-guide.md AGPL-3.0.txt sing-box-LICENSE.txt wintun-LICENSE.txt)
+          (cd release/teacher && zip -qr ../ohno-teacher-windows-x64.zip ohno-teacher.exe licenses trial-guide.md AGPL-3.0.txt)
+          gh release create v0.1.0-alpha.1 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.1" --notes-file docs/release-notes.md release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip

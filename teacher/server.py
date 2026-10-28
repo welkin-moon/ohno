@@ -258,7 +258,7 @@ class Handler(BaseHTTPRequestHandler):
                 domains = sorted(set(x.strip().lower() for x in one('domains').splitlines() if x.strip()))
                 hashes = sorted(set(x.strip().lower() for x in one('hashes').splitlines() if x.strip()))
                 names = sorted(set(x.strip().lower() for x in one('names').splitlines() if x.strip()))
-                if len(domains) > 1000 or len(hashes) > 1000 or len(names) > 1000 or any(not HOSTNAME.fullmatch(x) for x in domains) or any(not HASH.fullmatch(x) for x in hashes) or any(not PROGRAM_NAME.fullmatch(x) for x in names):
+                if len(domains) + (1 if one('block_local_files') == '1' else 0) > 1000 or len(hashes) > 1000 or len(names) > 1000 or any(not HOSTNAME.fullmatch(x) for x in domains) or any(not HASH.fullmatch(x) for x in hashes) or any(not PROGRAM_NAME.fullmatch(x) for x in names):
                     return self.reply(400, 'Invalid domains or SHA-256 values')
                 self.store.data.update(web_domains=domains, program_hashes=hashes, program_names=names, block_local_files=(one('block_local_files') == '1'), policy_revision=self.store.data['policy_revision']+1)
             elif self.path == '/device':
