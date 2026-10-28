@@ -24,6 +24,6 @@ cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp wind
 
 ## 安装器试验代码
 
-`setup.cpp` 和 `setup.rc` 可将服务嵌入一个原生安装程序。实验参数：`ohno-setup.exe --install https://teacher.example:8443`；移除：`ohno-setup.exe --remove`。程序要求管理员权限、创建自动启动服务并设置有限的 SCM 崩溃重启。它依赖系统已信任的教师服务器 HTTPS 证书。当前只适用于构建与隔离测试，尚未验证完整卸载、镜像分发和学校实际环境。
+`setup.cpp` 和 `setup.rc` 可将服务嵌入一个原生安装程序。实验参数：`ohno-setup.exe --install https://teacher.example:8443 --certificate cert.pem`（自签证书）或省略 `--certificate`（证书已受信任）；移除：`ohno-setup.exe --remove`。程序要求管理员权限、创建自动启动服务并设置有限的 SCM 崩溃重启。指定 `--certificate` 会把所提供的自签证书加入计算机根证书存储，影响全系统的信任范围；只应在学校 IT 核验证书后使用。卸载时只移除由安装器新增的证书。当前只适用于构建与隔离测试，尚未验证完整卸载、镜像分发和学校实际环境。
 
 策略在成功下载后缓存在受限注册表中；服务器离线时尝试继续执行缓存规则，但不沿用临时放行。若设备身份因硬件变化重建，会先清除本程序记录的 Edge 规则和缓存。断网期间的游戏申请只暂存在内存，重启服务后可能丢失。该机制尚需完整集成测试。

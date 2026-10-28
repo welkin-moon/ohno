@@ -53,10 +53,9 @@ def main():
         thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest().upper()
         Store.initialize(state,password)
         try:
-            subprocess.run(['certutil','-addstore','-f','Root',str(cert)],check=True,stdout=subprocess.DEVNULL);root_installed=True
             server=subprocess.Popen([sys.executable,str(root/'teacher/server.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
             waitfor(lambda:call('GET','/health')[0]==200,15)
-            subprocess.run([str(setup),'--install','https://localhost:8443'],check=True);installed=True
+            subprocess.run([str(setup),'--install','https://localhost:8443','--certificate',str(cert)],check=True);installed=True;root_installed=True
             def read():return json.loads(state.read_text('utf-8'))
             device=waitfor(lambda:next(iter(read()['devices']),None),90)
             status,headers,_=call('POST','/login',urlencode({'password':password}));assert status==303
@@ -77,12 +76,15 @@ def main():
             child.terminate();child.wait(timeout=5);child=None
             print('Windows service-to-teacher approval test passed')
         finally:
+            cleanup_failed=False
             if child and child.poll() is None:child.terminate();child.wait(timeout=5)
             if installed:
                 result=subprocess.run([str(setup),'--remove'])
-                if result.returncode:print('ERROR: failed to remove test service',file=sys.stderr)
+                if result.returncode:cleanup_failed=True
+                if subprocess.run(['certutil','-store','Root',thumb],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:cleanup_failed=True
             if server:
                 server.terminate();server.wait(timeout=10)
-            if root_installed:subprocess.run(['certutil','-delstore','Root',thumb],check=False,stdout=subprocess.DEVNULL)
+            if root_installed:subprocess.run(['certutil','-delstore','Root',thumb],check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if cleanup_failed:raise RuntimeError('service or imported root cleanup failed')
 
 if __name__=='__main__':main()
