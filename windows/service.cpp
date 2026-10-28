@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdio>
+#include "agent.hpp"
 namespace {
 constexpr wchar_t service_name[] = L"OhnoPrototype";
 SERVICE_STATUS_HANDLE status_handle = nullptr;
@@ -32,7 +33,7 @@ void WINAPI service_main(DWORD, LPWSTR*) {
     stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!stop_event) { report(SERVICE_STOPPED, GetLastError()); return; }
     report(SERVICE_RUNNING);
-    WaitForSingleObject(stop_event, INFINITE);
+    run_agent(stop_event);
     CloseHandle(stop_event);
     stop_event = nullptr;
     report(SERVICE_STOPPED);
