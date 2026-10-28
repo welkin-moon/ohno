@@ -92,7 +92,7 @@ def main():
             listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(8);port=str(listener.getsockname()[1])
             child=subprocess.Popen([str(network_target),port,'60000'])
             net_request=waitfor(lambda:next((x for x in read()['requests'] if x['kind']=='network' and x['object']==net_hash),None),80)
-            if child.wait(timeout=30)==0:raise RuntimeError('untrusted executable connected despite WFP rule')
+            if child.wait(timeout=75)==0:raise RuntimeError('untrusted executable connected despite WFP rule')
             child=None
             form('/request',{'csrf':csrf,'id':net_request['id'],'action':'approve'},cookie)
             def allowed_connect():
