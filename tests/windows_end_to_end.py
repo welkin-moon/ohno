@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -45,7 +46,7 @@ def form(path,values,cookie):
 
 
 def main():
-    server=None;child=None;installed=False;root_installed=False
+    server=None;child=None;listener=None;stream=None;installed=False;root_installed=False
     with tempfile.TemporaryDirectory() as temp:
         state=Path(temp)/'state.json'
         cert=Path(temp)/'test-cert.pem';key=Path(temp)/'test-key.pem'
@@ -84,10 +85,28 @@ def main():
                     count=winreg.QueryInfoKey(registry)[1]
                     return any(winreg.EnumValue(registry,i)[1]=='.game.example' for i in range(count))
             waitfor(allowed_site,90)
-            print('Windows service-to-teacher application and website approval tests passed')
+            # Mark a dedicated test executable as downloaded before launching it.
+            network_target=root/'network-target.exe';net_hash=hashlib.sha256(network_target.read_bytes()).hexdigest()
+            stream=str(network_target)+':Zone.Identifier'
+            Path(stream).write_text('[ZoneTransfer]\r\nZoneId=3\r\n',encoding='ascii')
+            listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(8);port=str(listener.getsockname()[1])
+            child=subprocess.Popen([str(network_target),port,'60000'])
+            net_request=waitfor(lambda:next((x for x in read()['requests'] if x['kind']=='network' and x['object']==net_hash),None),80)
+            if child.wait(timeout=30)==0:raise RuntimeError('untrusted executable connected despite WFP rule')
+            child=None
+            form('/request',{'csrf':csrf,'id':net_request['id'],'action':'approve'},cookie)
+            def allowed_connect():
+                result=subprocess.run([str(network_target),port],timeout=8)
+                return result.returncode==0
+            waitfor(allowed_connect,90)
+            print('Windows service-to-teacher application, website and network approval tests passed')
         finally:
             cleanup_failed=False
             if child and child.poll() is None:child.terminate();child.wait(timeout=5)
+            if listener:listener.close()
+            if stream:
+                try:Path(stream).unlink()
+                except FileNotFoundError:pass
             if installed:
                 result=subprocess.run([str(setup),'--remove'])
                 if result.returncode:cleanup_failed=True
