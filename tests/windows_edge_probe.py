@@ -22,9 +22,13 @@ def main():
     server=HTTPServer(('127.0.0.1',0),Page);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     with tempfile.TemporaryDirectory() as tmp:
         browser_key=winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WRITE|winreg.KEY_WOW64_64KEY)
+        allow_key=winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Policies\Microsoft\Edge\URLAllowlist',0,winreg.KEY_READ|winreg.KEY_WRITE|winreg.KEY_WOW64_64KEY)
+        previous=None;previous_allow=None
         try:
             try:previous=winreg.QueryValueEx(browser_key,'1')
             except FileNotFoundError:previous=None
+            try:previous_allow=winreg.QueryValueEx(allow_key,'1')
+            except FileNotFoundError:previous_allow=None
             def run(address,idx):
                 args=[str(edge),'--headless','--disable-gpu','--no-first-run','--disable-background-networking','--user-data-dir='+str(Path(tmp)/('profile'+str(idx))),'--dump-dom',address]
                 result=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45)
@@ -38,6 +42,11 @@ def main():
             print('Edge blocked exit:',code,'stderr:',errors[-3000:])
             if 'ERR_BLOCKED_BY_ADMINISTRATOR' not in (blocked+errors):raise RuntimeError('Could not confirm browser policy as the block reason')
             print('Edge domain policy blocked the local page')
+            winreg.SetValueEx(allow_key,'1',0,winreg.REG_SZ,'.localhost')
+            if MARKER not in run(url,10)[0]:raise RuntimeError('Edge exact-host allowlist did not override block')
+            print('Edge exact-host allowlist restored the page')
+            if previous_allow:winreg.SetValueEx(allow_key,'1',0,previous_allow[1],previous_allow[0])
+            else:winreg.DeleteValue(allow_key,'1')
             local=Path(tmp)/'local.html';local.write_text('<title>'+MARKER+'</title>',encoding='utf-8')
             local_url=local.as_uri()
             if MARKER not in run(local_url,9)[0]:raise RuntimeError('Baseline local file did not load in Edge')
@@ -51,7 +60,11 @@ def main():
             else:
                 try:winreg.DeleteValue(browser_key,'1')
                 except FileNotFoundError:pass
-            winreg.CloseKey(browser_key)
+            if previous_allow:winreg.SetValueEx(allow_key,'1',0,previous_allow[1],previous_allow[0])
+            else:
+                try:winreg.DeleteValue(allow_key,'1')
+                except FileNotFoundError:pass
+            winreg.CloseKey(allow_key);winreg.CloseKey(browser_key)
             server.shutdown();server.server_close();thread.join()
 
 if __name__=='__main__':main()
