@@ -9,8 +9,11 @@ policy-test: tests/policy_test.cpp src/policy.cpp src/policy.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/policy_test.cpp src/policy.cpp -o $@
 json-test: tests/json_test.cpp src/json.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/json_test.cpp -o $@
-test: policy-test json-test
+smbios-test: tests/smbios_test.cpp src/smbios.hpp
+	$(CXX) $(CXXFLAGS) -Isrc tests/smbios_test.cpp -o $@
+test: policy-test json-test smbios-test
 	./policy-test
 	./json-test
+	./smbios-test
 clean:
-	rm -f ohno-sim policy-test json-test
+	rm -f ohno-sim policy-test json-test smbios-test

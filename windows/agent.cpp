@@ -12,6 +12,7 @@
 #include <ctime>
 #include <map>
 #include "../src/json.hpp"
+#include "../src/smbios.hpp"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -46,15 +47,29 @@ std::string random_hex(std::size_t count){
     const char* hex="0123456789abcdef";std::string result;result.reserve(count*2);for(auto b:bytes){result+=hex[b>>4];result+=hex[b&15];}return result;
 }
 struct identity{std::string id,key;};
+std::string machine_anchor(){
+    constexpr DWORD rsmb=0x52534d42; // 'RSMB'
+    UINT size=GetSystemFirmwareTable(rsmb,0,nullptr,0);
+    if(size<8||size>4*1024*1024)throw std::runtime_error("SMBIOS unavailable");
+    std::vector<std::uint8_t> data(size);
+    if(GetSystemFirmwareTable(rsmb,0,data.data(),size)!=size)throw std::runtime_error("SMBIOS read failed");
+    auto uuid=ohno::smbios_uuid(data);if(uuid.empty())throw std::runtime_error("SMBIOS UUID unavailable");
+    return uuid;
+}
 identity get_identity(){
+    const auto anchor=machine_anchor();
     PSECURITY_DESCRIPTOR sd=nullptr;
     if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;KA;;;SY)(A;;KA;;;BA)",SDDL_REVISION_1,&sd,nullptr))throw std::runtime_error("security descriptor");
     SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};reg_key key;
     LONG status=RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,nullptr,0,KEY_READ|KEY_WRITE,&sa,&key.h,nullptr);
     LocalFree(sd);if(status!=ERROR_SUCCESS)throw std::runtime_error("identity key");
-    auto id=read_string(key.h,L"DeviceId"), secret=read_string(key.h,L"DeviceKey");
-    if(id.size()!=32||secret.size()!=64){auto newid=random_hex(16),newkey=random_hex(32);write_string(key.h,L"DeviceId",wide_ascii(newid));write_string(key.h,L"DeviceKey",wide_ascii(newkey));return {newid,newkey};}
-    return {utf8(id),utf8(secret)};
+    const std::string stored=utf8(read_string(key.h,L"Credentials"));
+    if(stored.size()==130&&stored[32]==':'&&stored[65]==':'&&stored.substr(0,32)==anchor)
+        return {stored.substr(33,32),stored.substr(66,64)};
+    auto newid=random_hex(16),newkey=random_hex(32);
+    // A single registry value avoids persisting a partial id/key/anchor update.
+    write_string(key.h,L"Credentials",wide_ascii(anchor+":"+newid+":"+newkey));
+    return {newid,newkey};
 }
 std::wstring get_server(){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};

@@ -8,3 +8,4 @@ state.json
 *.pem
 *.key
 json-test
+smbios-test
