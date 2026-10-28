@@ -12,7 +12,7 @@ RequestPipe::~RequestPipe(){if(worker_.joinable())worker_.join();}
 void RequestPipe::serve(){
     PSECURITY_DESCRIPTOR sd=nullptr;
     // Authenticated local users can read/write their request but cannot create server instances.
-    if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x120003;;;AU)",SDDL_REVISION_1,&sd,nullptr))return;
+    if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x12019B;;;AU)",SDDL_REVISION_1,&sd,nullptr))return;
     SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};
     while(WaitForSingleObject(stop_,0)==WAIT_TIMEOUT){
         handle pipe{CreateNamedPipeW(L"\\\\.\\pipe\\OhnoWebsiteRequest",PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,1024,1024,0,&sa)};
