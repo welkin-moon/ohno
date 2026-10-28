@@ -203,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
         rows = []
         for dev_id, dev in devices:
             action = '<form method="post" action="/device">' + hidden + '<input type="hidden" name="id" value="' + esc(dev_id) + '"><button name="approved" value="' + ('0' if dev['approved'] else '1') + '">' + ('停用' if dev['approved'] else '批准设备') + '</button></form>'
-            rows.append('<tr><td>' + esc(dev['name']) + '</td><td>' + esc(dev_id[:12]) + '</td><td>' + ('已批准' if dev['approved'] else '待批准') + ' / ' + ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') + ' / TUN: ' + ('正常' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') + '</td><td>' + action + '</td></tr>')
+            rows.append('<tr><td>' + esc(dev['name']) + '</td><td>' + esc(dev_id[:12]) + '</td><td>' + ('已批准' if dev['approved'] else '待批准') + ' / ' + ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') + ' / TUN 进程: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') + ' / WFP 引擎: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') + '</td><td>' + action + '</td></tr>')
         req_rows = []
         for item in requests:
             action = ''
@@ -279,8 +279,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def register(self, data):
         dev_id, key, name = data.get('id'), data.get('key'), data.get('name')
-        tun = data.get('tun')
-        if tun is not None and not isinstance(tun, bool): return self.json_reply(400, {'error': 'invalid TUN status'})
+        tun, wfp = data.get('tun'), data.get('wfp')
+        if (tun is not None and not isinstance(tun, bool)) or (wfp is not None and not isinstance(wfp, bool)): return self.json_reply(400, {'error': 'invalid status'})
         if not all(isinstance(x, str) for x in (dev_id, key, name)) or not ID.fullmatch(dev_id) or not ID.fullmatch(key) or not 1 <= len(name) <= 128:
             return self.json_reply(400, {'error': 'invalid device registration'})
         with self.store.lock:
@@ -289,12 +289,12 @@ class Handler(BaseHTTPRequestHandler):
             if dev:
                 if not hmac.compare_digest(dev['key_hash'], digest):
                     return self.json_reply(403, {'error': 'device id already used'})
-                dev['last_seen'] = int(time.time()); dev['tun'] = tun
+                dev['last_seen'] = int(time.time()); dev['tun'] = tun; dev['wfp'] = wfp
                 self.store.save()
                 return self.json_reply(200, {'approved': dev['approved']})
             if len(self.store.data['devices']) >= 1000:
                 return self.json_reply(429, {'error': 'device capacity'})
-            self.store.data['devices'][dev_id] = {'name': name, 'key_hash': digest, 'approved': False, 'last_seen': int(time.time()), 'tun': tun}
+            self.store.data['devices'][dev_id] = {'name': name, 'key_hash': digest, 'approved': False, 'last_seen': int(time.time()), 'tun': tun, 'wfp': wfp}
             self.store.save()
         return self.json_reply(201, {'approved': False})
 

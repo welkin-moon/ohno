@@ -145,7 +145,7 @@ void run_agent(HANDLE stop_event){
             try{
                 wchar_t name[MAX_COMPUTERNAME_LENGTH+1]{};DWORD n=MAX_COMPUTERNAME_LENGTH+1;
                 std::wstring pc=GetComputerNameW(name,&n)?std::wstring(name,n):L"unknown";
-                std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+",\"tun\":"+(tun_ok?"true":"false")+"}";
+                std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+",\"tun\":"+(tun_ok?"true":"false")+",\"wfp\":"+(network.available()?"true":"false")+"}";
                 auto reg=request(server,L"POST",L"/api/device/register",L"Content-Type: application/json\r\n",data);
                 if(reg.status==200||reg.status==201){
                     auto result=ohno_json::parse(reg.body);const auto& approved=result.at("approved");
