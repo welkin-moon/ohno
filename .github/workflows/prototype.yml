@@ -1,0 +1,166 @@
+name: Prototype checks
+on:
+  push:
+    branches: [work/first-version, main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install teacher build dependencies
+        run: python3 -m pip install -r teacher/requirements.txt
+      - name: Test teacher service
+        run: python3 -m unittest discover -s teacher -p 'test_*.py' -v
+      - name: Test policy core
+        run: make test
+  windows-build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned TUN engine
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip -OutFile sing-box.zip
+          if ((Get-FileHash sing-box.zip -Algorithm SHA256).Hash.ToLower() -ne '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df') { throw 'TUN archive SHA-256 mismatch' }
+          Expand-Archive sing-box.zip -DestinationPath tun-upstream
+          Copy-Item (Get-ChildItem tun-upstream -Recurse -Filter sing-box.exe | Select-Object -First 1).FullName ohno-tun.exe
+          Copy-Item windows/sing-box-LICENSE.txt sing-box-LICENSE.txt
+          Copy-Item windows/wintun-LICENSE.txt wintun-LICENSE.txt
+      - name: Build native service scaffold
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
+          if not defined VSDIR exit /b 1
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_test.cpp windows\request_pipe.cpp src\policy.cpp /Fe:pipe-test.exe advapi32.lib
+          if errorlevel 1 exit /b 1
+          pipe-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp /Fe:pipe-client.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\tun_config_emit.cpp src\policy.cpp /Fe:tun-config.exe
+          if errorlevel 1 exit /b 1
+          tun-config.exe > generated-tun.json
+          ohno-tun.exe check -c generated-tun.json
+          if errorlevel 1 exit /b 1
+          rc /fo setup.res windows\setup.rc
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp windows\browser_policy.cpp src\policy.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib /link /MANIFEST:NO
+          if errorlevel 1 exit /b 1
+          cl /std:c++17 /EHsc /W4 /MT /Isrc tests\policy_test.cpp src\policy.cpp /Fe:policy-test.exe
+          if errorlevel 1 exit /b 1
+          policy-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_browser_policy_test.cpp windows\browser_policy.cpp src\policy.cpp /Fe:browser-policy-test.exe advapi32.lib
+          if errorlevel 1 exit /b 1
+          browser-policy-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_network_target.cpp /Fe:network-target.exe ws2_32.lib
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_network_test.cpp windows\network_filter.cpp /Fe:network-test.exe ws2_32.lib fwpuclnt.lib rpcrt4.lib
+          if errorlevel 1 exit /b 1
+          network-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_target.cpp /Fe:test-target.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_origin_test.cpp windows\monitor.cpp /Fe:origin-test.exe bcrypt.lib wtsapi32.lib
+          if errorlevel 1 exit /b 1
+          origin-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_monitor_test.cpp windows\monitor.cpp /Fe:monitor-test.exe bcrypt.lib wtsapi32.lib
+          if errorlevel 1 exit /b 1
+          for /f %%h in ('powershell -NoProfile -Command "(Get-FileHash test-target.exe -Algorithm SHA256).Hash.ToLower()"') do set "HASH=%%h"
+          monitor-test.exe %HASH%
+          if errorlevel 1 exit /b 1
+      - name: Install and remove service in ephemeral runner
+        shell: pwsh
+        run: |
+          $p = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Runner is not elevated' }
+          try {
+            & .\ohno-setup.exe --install https://localhost:8443
+            if ($LASTEXITCODE -ne 0) { throw 'Installer failed' }
+            & sc.exe query OhnoPrototype
+            if ($LASTEXITCODE -ne 0) { throw 'Service missing' }
+          } finally {
+            & .\ohno-setup.exe --remove
+            if ($LASTEXITCODE -ne 0) { throw 'Uninstall failed' }
+          }
+      - name: Upload client prototype
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohno-client-prototype-windows-x64
+          path: |
+            ohno-service-prototype.exe
+            ohno-setup.exe
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify Edge domain policy
+        shell: cmd
+        run: python tests\windows_edge_probe.py
+      - name: Exercise teacher and native service together
+        shell: cmd
+        run: python tests\windows_end_to_end.py
+      - name: Bundle teacher prototype
+        shell: cmd
+        run: |
+          python -m pip install pyinstaller==6.16.0 -r teacher/requirements.txt
+          if errorlevel 1 exit /b 1
+          python -m PyInstaller --onefile --name ohno-teacher teacher\server.py
+          if errorlevel 1 exit /b 1
+          dist\ohno-teacher.exe --help
+          if errorlevel 1 exit /b 1
+          dist\ohno-teacher.exe --generate-certificate --host localhost --cert %TEMP%\ohno-cert.pem --key %TEMP%\ohno-key.pem
+          if errorlevel 1 exit /b 1
+          python tests\collect_licenses.py
+          if errorlevel 1 exit /b 1
+      - name: Upload teacher prototype
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohno-teacher-prototype-windows-x64
+          path: |
+            dist/ohno-teacher.exe
+            dist/licenses
+  publish-prerelease:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v0.1.0-alpha.1]')
+    needs: [linux, windows-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ohno-client-prototype-windows-x64
+          path: release/client
+      - uses: actions/download-artifact@v4
+        with:
+          name: ohno-teacher-prototype-windows-x64
+          path: release/teacher
+      - name: Package and publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp docs/trial-guide.md release/client/trial-guide.md
+          cp docs/trial-guide.md release/teacher/trial-guide.md
+          cp LICENSE release/client/AGPL-3.0.txt
+          cp LICENSE release/teacher/AGPL-3.0.txt
+          cp windows/sing-box-LICENSE.txt release/client/sing-box-LICENSE.txt
+          cp windows/wintun-LICENSE.txt release/client/wintun-LICENSE.txt
+          (cd release/client && zip -q ../ohno-client-windows-x64.zip ohno-setup.exe trial-guide.md AGPL-3.0.txt sing-box-LICENSE.txt wintun-LICENSE.txt)
+          (cd release/teacher && zip -qr ../ohno-teacher-windows-x64.zip ohno-teacher.exe licenses trial-guide.md AGPL-3.0.txt)
+          gh release create v0.1.0-alpha.1 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.1" --notes-file docs/release-notes.md release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip
