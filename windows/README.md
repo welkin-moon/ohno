@@ -11,14 +11,14 @@
 在仓库根目录的 Visual Studio x64 开发者命令行中，使用 Windows SDK 编译：
 
 ```
-cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
+cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
 ```
 
 构建需要编译器及 SDK，成品运行时按 `/MT` 静态链接 C/C++ 运行库，不需要另装 .NET 或 Visual C++ 再发行包。精简系统可能缺失 Windows 自身的基础组件，必须通过实机检查和测试。
 
 安装器仅供隔离环境试验，不能用于真实教室镜像。
 
-服务从注册表 `HKLM\SOFTWARE\Ohno` 的字符串值 `ServerUrl` 读取教师端 HTTPS 根地址，使用系统证书信任链；设备凭据在本机系统注册表生成，教师批准后开始轮询。原型会在硬件 SMBIOS UUID 改变时重建设备凭据并请求审批；UUID 不存在时拒绝注册。尚未验证兆芯机器的 UUID 是否存在且唯一，因此仍不能用于实际镜像分发。
+服务从注册表 `HKLM\SOFTWARE\Ohno` 的字符串值 `ServerUrl` 读取教师端 HTTPS 根地址，使用系统证书信任链；设备凭据在本机系统注册表生成，教师批准后开始轮询。原型使用物理网卡永久 MAC（优先有线）、SMBIOS UUID 共同锚定设备凭据，IP 地址变化不影响身份。若原系统不报告物理 MAC，则退回支持的网卡当前地址，若完全无法识别 MAC 则教师端拒绝绑定审批。主硬件锚变化时重建设备凭据并请求教师重新审批；没有 UUID 且没有可用 MAC 时拒绝注册。尚未验证兆芯机器的 UUID 是否存在且唯一，因此仍不能用于实际镜像分发。
 
 进程检测存在启动后至扫描前的时间窗口，拒绝执行可能失败，不能作为恶意程序防护。网站规则通过 TUN 按可识别的域名拦截，并通过 Edge 的 URLBlocklist 补充；加密或无法识别的域名及排除的内网网段不保证覆盖。不会显示自定义提示；网站申请需要通过桌面快捷方式手动发起。来源联网限制仅有不完整的试验性实现。教师可选择对 Edge 尝试限制所有本地文件；它可能影响 PDF 和课件，且无法保证覆盖全部本地 HTML。
 
