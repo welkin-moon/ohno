@@ -60,7 +60,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ohno-client-prototype-windows-x64
-          path: |\n            ohno-service-prototype.exe\n            ohno-setup.exe
+          path: |
+            ohno-service-prototype.exe
+            ohno-setup.exe
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
