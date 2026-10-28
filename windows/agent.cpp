@@ -178,12 +178,12 @@ void run_agent(HANDLE stop_event){
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
                 network.set_paused(paused);
-                if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed)){
+                if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed,0,stop_event)){
                     auto now=GetTickCount64();auto it=last_request.find(app.hash);
                     if(it==last_request.end()||now-it->second>=60000){last_request[app.hash]=now;queued.emplace("A:"+app.hash,app.name);}
                 }
                 network.apply_grants(network_allowed);
-                if(!paused)for(const auto& app:observe_untrusted_programs()){
+                if(!paused)for(const auto& app:observe_untrusted_programs(stop_event)){
                     if(std::find(network_allowed.begin(),network_allowed.end(),app.hash)!=network_allowed.end())continue;
                     if(network.register_untrusted(app.path,app.hash)){
                         auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);
