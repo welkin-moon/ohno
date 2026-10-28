@@ -24,13 +24,22 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch pinned TUN engine
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip -OutFile sing-box.zip
+          if ((Get-FileHash sing-box.zip -Algorithm SHA256).Hash.ToLower() -ne '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df') { throw 'TUN archive SHA-256 mismatch' }
+          Expand-Archive sing-box.zip -DestinationPath tun-upstream
+          Copy-Item (Get-ChildItem tun-upstream -Recurse -Filter sing-box.exe | Select-Object -First 1).FullName ohno-tun.exe
+          Copy-Item windows/sing-box-LICENSE.txt sing-box-LICENSE.txt
+          Copy-Item windows/wintun-LICENSE.txt wintun-LICENSE.txt
       - name: Build native service scaffold
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
           if not defined VSDIR exit /b 1
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
           if errorlevel 1 exit /b 1
@@ -39,6 +48,11 @@ jobs:
           pipe-test.exe
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp /Fe:pipe-client.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\tun_config_emit.cpp src\policy.cpp /Fe:tun-config.exe
+          if errorlevel 1 exit /b 1
+          tun-config.exe > generated-tun.json
+          ohno-tun.exe check -c generated-tun.json
           if errorlevel 1 exit /b 1
           rc /fo setup.res windows\setup.rc
           if errorlevel 1 exit /b 1

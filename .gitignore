@@ -9,3 +9,4 @@ state.json
 *.key
 json-test
 smbios-test
+tun-config-test

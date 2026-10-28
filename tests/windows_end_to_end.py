@@ -60,6 +60,9 @@ def main():
             subprocess.run([str(setup),'--install','https://localhost:8443','--certificate',str(cert)],check=True);installed=True;root_installed=True
             def read():return json.loads(state.read_text('utf-8'))
             device=waitfor(lambda:next(iter(read()['devices']),None),90)
+            waitfor(lambda:read()['devices'][device].get('tun') is True,90)
+            adapter=subprocess.run(['powershell','-NoProfile','-Command',"if (Get-NetAdapter -Name 'ohno-tun' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"])
+            if adapter.returncode:raise RuntimeError('TUN adapter not found')
             status,headers,_=call('POST','/login',urlencode({'password':password}));assert status==303
             cookie=headers['Set-Cookie'].split(';')[0]
             status,_,page=call('GET','/',headers={'Cookie':cookie});assert status==200

@@ -11,6 +11,7 @@
 #include "browser_policy.hpp"
 #include "network_filter.hpp"
 #include "request_pipe.hpp"
+#include "tun_manager.hpp"
 #include <algorithm>
 #include <ctime>
 #include <map>
@@ -129,11 +130,14 @@ void run_agent(HANDLE stop_event){
         }catch(const std::exception&){return "unavailable";}
     };
     RequestPipe website_requests(stop_event,on_request);
+    TunManager tun(stop_event);
+    std::vector<std::string> tun_blocked,tun_allowed;
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
     std::map<std::string,std::wstring> queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
+        bool tun_ok=tun.ensure(tun_blocked,tun_allowed);
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
             auto ident=get_identity();auto policy_text=cached_policy();bool online=false;
@@ -141,7 +145,7 @@ void run_agent(HANDLE stop_event){
             try{
                 wchar_t name[MAX_COMPUTERNAME_LENGTH+1]{};DWORD n=MAX_COMPUTERNAME_LENGTH+1;
                 std::wstring pc=GetComputerNameW(name,&n)?std::wstring(name,n):L"unknown";
-                std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+"}";
+                std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+",\"tun\":"+(tun_ok?"true":"false")+"}";
                 auto reg=request(server,L"POST",L"/api/device/register",L"Content-Type: application/json\r\n",data);
                 if(reg.status==200||reg.status==201){
                     auto result=ohno_json::parse(reg.body);const auto& approved=result.at("approved");
@@ -169,6 +173,8 @@ void run_agent(HANDLE stop_event){
                     }
                 }
                 if(paused)domains.clear();
+                tun_blocked=domains;tun_allowed=site_allowed;
+                if(!tun.ensure(tun_blocked,tun_allowed))debug(L"ohno: TUN unavailable or restarting\n");
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
                 network.set_paused(paused);

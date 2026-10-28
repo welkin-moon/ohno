@@ -88,9 +88,9 @@ int install(const wchar_t* url,const wchar_t* certificate_path){
     sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){std::fwprintf(stderr,L"Service already exists.\n");return 1;}
     reg prior;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&prior.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno registry key already exists.\n");return 1;}
     std::wstring dir=directory();if(dir.empty()||!CreateDirectoryW(dir.c_str(),nullptr)){std::fwprintf(stderr,L"Cannot create program directory (%lu)\n",GetLastError());return 1;}
-    std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe",shortcut;bool made_key=false;bool made_service=false;int result=1;
+    std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe",tun=dir+L"\\ohno-tun.exe",gpl=dir+L"\\sing-box-LICENSE.txt",wintun=dir+L"\\wintun-LICENSE.txt",shortcut;bool made_key=false;bool made_service=false;int result=1;
     do{
-        if(!embedded_exe(exe,101)||!embedded_exe(helper,102)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
+        if(!embedded_exe(exe,101)||!embedded_exe(helper,102)||!embedded_exe(tun,103)||!embedded_exe(gpl,105)||!embedded_exe(wintun,106)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
         reg config;DWORD disposition=0;
         if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,nullptr,0,KEY_WRITE,nullptr,&config.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY){std::fwprintf(stderr,L"Cannot create configuration.\n");break;}
         made_key=true;
@@ -108,7 +108,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path){
         if(!StartServiceW(svc.h,0,nullptr)){std::fwprintf(stderr,L"Cannot start service (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
         std::wprintf(L"Prototype installed. Approve the device in the teacher UI.\n");result=0;
     }while(false);
-    if(result){if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());RemoveDirectoryW(dir.c_str());}
+    if(result){if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());RemoveDirectoryW(dir.c_str());}
     return result;
 }
 int remove(){
@@ -123,6 +123,9 @@ int remove(){
     if(!DeleteService(svc.h)){std::fwprintf(stderr,L"Cannot delete service (%lu)\n",GetLastError());return 1;}
     std::wstring dir=directory();std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe";
     remove_shortcut(shortcut,helper);
+    DeleteFileW((dir+L"\\ohno-tun.json").c_str());DeleteFileW((dir+L"\\ohno-tun.json.tmp").c_str());
+    DeleteFileW((dir+L"\\wintun-LICENSE.txt").c_str());DeleteFileW((dir+L"\\sing-box-LICENSE.txt").c_str());
+    DeleteFileW((dir+L"\\ohno-tun.exe").c_str());
     if(!DeleteFileW(helper.c_str()))std::fwprintf(stderr,L"Could not remove request helper (%lu).\n",GetLastError());
     if(!DeleteFileW(exe.c_str()))std::fwprintf(stderr,L"Could not remove service executable (%lu); remove manually after reboot.\n",GetLastError());
     if(!RemoveDirectoryW(dir.c_str()))std::fwprintf(stderr,L"Could not remove program folder (%lu); inspect manually.\n",GetLastError());

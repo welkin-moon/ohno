@@ -11,7 +11,7 @@
 在仓库根目录的 Visual Studio x64 开发者命令行中，使用 Windows SDK 编译：
 
 ```
-cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
+cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
 ```
 
 构建需要编译器及 SDK，成品运行时按 `/MT` 静态链接 C/C++ 运行库，不需要另装 .NET 或 Visual C++ 再发行包。精简系统可能缺失 Windows 自身的基础组件，必须通过实机检查和测试。
@@ -20,7 +20,7 @@ cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp wind
 
 服务从注册表 `HKLM\SOFTWARE\Ohno` 的字符串值 `ServerUrl` 读取教师端 HTTPS 根地址，使用系统证书信任链；设备凭据在本机系统注册表生成，教师批准后开始轮询。原型会在硬件 SMBIOS UUID 改变时重建设备凭据并请求审批；UUID 不存在时拒绝注册。尚未验证兆芯机器的 UUID 是否存在且唯一，因此仍不能用于实际镜像分发。
 
-进程检测存在启动后至扫描前的时间窗口，拒绝执行可能失败，不能作为恶意程序防护。网站规则通过 Edge 的 URLBlocklist 试验性应用，只覆盖受此策略管理的 Edge；不会显示自定义提示；网站申请需要通过桌面快捷方式手动发起。来源联网限制仅有不完整的试验性实现。教师可选择对 Edge 尝试限制所有本地文件；它可能影响 PDF 和课件，且无法保证覆盖全部本地 HTML。
+进程检测存在启动后至扫描前的时间窗口，拒绝执行可能失败，不能作为恶意程序防护。网站规则通过 TUN 按可识别的域名拦截，并通过 Edge 的 URLBlocklist 补充；加密或无法识别的域名及排除的内网网段不保证覆盖。不会显示自定义提示；网站申请需要通过桌面快捷方式手动发起。来源联网限制仅有不完整的试验性实现。教师可选择对 Edge 尝试限制所有本地文件；它可能影响 PDF 和课件，且无法保证覆盖全部本地 HTML。
 
 ## 安装器试验代码
 
@@ -33,3 +33,5 @@ cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp wind
 安装器会创建“ohno website request”公共桌面快捷方式。学生输入域名后，本机服务向教师端提交网站申请；教师批准后试验性地通过 Edge URLAllowlist 对该设备精确放行，过期或离线后移除。请求与放行目前只覆盖 Edge；服务重启时未同步的请求会丢失。
 
 教师可通过本机窗口在线输入教师密码，暂时解除本机 ohno 限制一小时；断网时暂停失效。因为学生拥有管理员权限，他们可能读取或记录输入的密码，建议优先在教师端远程审批，并使用不复用的课堂密码。
+
+TUN 使用随安装包携带的 sing-box 1.14.4（含 Wintun），由唯一 Windows 服务启动和管理；不需要目标机单独下载运行时。为了减少与教师端及学校局域网冲突，TUN 排除常见私有网段；系统管理员仍可停止进程或修改路由。教师端的设备列表显示最近心跳与 TUN 进程状态。
