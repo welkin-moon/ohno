@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <string>
+#include "browser_policy.hpp"
 #pragma comment(lib,"advapi32.lib")
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
@@ -54,6 +55,7 @@ int remove(){
     SERVICE_STATUS status{};ControlService(svc.h,SERVICE_CONTROL_STOP,&status);
     for(int i=0;i<40;++i){if(!QueryServiceStatus(svc.h,&status))return 1;if(status.dwCurrentState==SERVICE_STOPPED)break;Sleep(500);}
     if(status.dwCurrentState!=SERVICE_STOPPED){std::fwprintf(stderr,L"Service did not stop; no files removed.\n");return 1;}
+    if(!clear_edge_policy()){std::fwprintf(stderr,L"Could not restore Edge URL policy; service retained.\n");return 1;}
     if(!DeleteService(svc.h)){std::fwprintf(stderr,L"Cannot delete service (%lu)\n",GetLastError());return 1;}
     std::wstring dir=directory();std::wstring exe=dir+L"\\ohno-service.exe";
     if(!DeleteFileW(exe.c_str()))std::fwprintf(stderr,L"Could not remove service executable (%lu); remove manually after reboot.\n",GetLastError());

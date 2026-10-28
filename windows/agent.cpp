@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include "agent.hpp"
 #include "monitor.hpp"
+#include "browser_policy.hpp"
 #include <algorithm>
 #include <ctime>
 #include <map>
@@ -110,8 +111,10 @@ void run_agent(HANDLE stop_event){
                     auto policy=request(server,L"GET",L"/api/device/policy",h,{});
                     if(policy.status==200){
                         auto p=ohno_json::parse(policy.body);
-                        const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");
-                        if(rules.type!=ohno_json::value::kind::array||grants.type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
+                        const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");
+                        if(rules.type!=ohno_json::value::kind::array||grants.type!=ohno_json::value::kind::array||web.type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
+                        std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
+                        if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                         std::vector<std::string> blocked;
                         for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
                         for(const auto& grant:grants.items){
