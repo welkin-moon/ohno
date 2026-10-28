@@ -77,18 +77,25 @@ class Store:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def authenticate(self, password, address):
+    def verify_password(self, password, address):
         with self.lock:
             now = time.monotonic()
             attempts = [x for x in self.attempts.get(address, []) if now - x < 300]
             if len(attempts) >= 8:
                 self.attempts[address] = attempts
-                return None
+                return False
             if not hmac.compare_digest(password_hash(password, self.data['salt']), self.data['password_hash']):
                 attempts.append(now)
                 self.attempts[address] = attempts
-                return None
+                return False
             self.attempts.pop(address, None)
+            return True
+
+    def authenticate(self, password, address):
+        if not self.verify_password(password, address):
+            return None
+        with self.lock:
+            now = time.monotonic()
             token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
             self.sessions[token] = (csrf, now + 3600)
             return token, csrf
@@ -224,6 +231,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.register(data)
             if self.path == '/api/device/request':
                 return self.submit_request(data)
+            if self.path == '/api/device/unlock':
+                return self.unlock_device(data)
             return self.json_reply(404, {'error': 'not found'})
         try:
             form = parse_qs(raw.decode('utf-8'), keep_blank_values=True, max_num_fields=20)
@@ -284,6 +293,25 @@ class Handler(BaseHTTPRequestHandler):
             self.store.data['devices'][dev_id] = {'name': name, 'key_hash': digest, 'approved': False}
             self.store.save()
         return self.json_reply(201, {'approved': False})
+
+    def unlock_device(self, data):
+        dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
+        password = data.get('password')
+        if not isinstance(password, str) or len(password) > 512:
+            return self.json_reply(400, {'error': 'invalid password'})
+        if not self.store.device(dev_id, key):
+            return self.json_reply(403, {'error': 'device not authorized'})
+        if not self.store.verify_password(password, 'device:' + dev_id):
+            return self.json_reply(403, {'error': 'invalid password or temporarily rate limited'})
+        with self.store.lock:
+            if not self.store.device(dev_id, key):
+                return self.json_reply(403, {'error': 'device not authorized'})
+            if len(self.store.data['requests']) >= 10000:
+                return self.json_reply(429, {'error': 'request capacity'})
+            item = {'id': secrets.token_urlsafe(18), 'device_id': dev_id, 'kind': 'pause', 'object': '*', 'state': 'approved', 'created': int(time.time()), 'expires': int(time.time()) + 3600}
+            self.store.data['requests'].append(item)
+            self.store.save()
+        return self.json_reply(201, {'expires': item['expires']})
 
     def submit_request(self, data):
         dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')

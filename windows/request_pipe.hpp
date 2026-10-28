@@ -1,20 +1,16 @@
 #pragma once
 #include <windows.h>
-#include <mutex>
-#include <set>
+#include <functional>
 #include <string>
 #include <thread>
-#include <vector>
 class RequestPipe {
     HANDLE stop_;
-    std::mutex mutex_;
-    std::set<std::string> pending_;
+    std::function<std::string(const std::string&)> callback_;
     std::thread worker_;
     void serve();
 public:
-    explicit RequestPipe(HANDLE stop);
+    RequestPipe(HANDLE stop,std::function<std::string(const std::string&)> callback);
     ~RequestPipe();
     RequestPipe(const RequestPipe&)=delete;
     RequestPipe& operator=(const RequestPipe&)=delete;
-    std::vector<std::string> take();
 };

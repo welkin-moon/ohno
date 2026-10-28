@@ -21,6 +21,7 @@ int main(){
  if(launch(path,port)!=0)return 6;
  NetworkFilter filter;if(!filter.available()||!filter.register_untrusted(path,token))return 7;
  if(launch(path,port)==0)return 8;
+ filter.set_paused(true);if(launch(path,port)!=0)return 11;filter.set_paused(false);if(launch(path,port)==0)return 12;
  filter.apply_grants({token});if(launch(path,port)!=0)return 9;
  filter.apply_grants({});if(launch(path,port)==0)return 10;
  closesocket(listener);WSACleanup();std::puts("WFP outbound block and grant test passed");return 0;

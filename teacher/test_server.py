@@ -57,6 +57,9 @@ class TeacherIntegration(unittest.TestCase):
         status, _, body=self.req('POST','/api/device/request',json.dumps({'kind':'website','object':'games.example'}),auth);self.assertEqual(status,201);request_id=json.loads(body)['id']
         status, _, _=self.req('POST','/request',urlencode({'csrf':csrf,'id':request_id,'action':'approve'}),{'Cookie':cookie});self.assertEqual(status,303)
         status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['grants'][0]['object'],'games.example')
+        self.assertEqual(self.req('POST','/api/device/unlock',json.dumps({'password':'wrong'}),auth)[0],403)
+        self.assertEqual(self.req('POST','/api/device/unlock',json.dumps({'password':'a-strong-test-password'}),auth)[0],201)
+        self.assertTrue(any(x['kind']=='pause' for x in json.loads(self.req('GET','/api/device/policy',headers=auth)[2])['grants']))
         self.assertEqual(self.req('GET','/api/device/policy',headers={'X-Ohno-Device':dev,'X-Ohno-Key':'wrong'})[0],403)
         status, _, _=self.req('POST','/device',urlencode({'csrf':csrf,'id':dev,'approved':'0'}),{'Cookie':cookie});self.assertEqual(status,303)
         self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],403)

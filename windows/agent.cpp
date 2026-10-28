@@ -15,6 +15,7 @@
 #include <ctime>
 #include <map>
 #include <set>
+#include <mutex>
 #include "../src/json.hpp"
 #include "../src/smbios.hpp"
 #include "../src/policy.hpp"
@@ -52,6 +53,8 @@ std::string random_hex(std::size_t count){
     const char* hex="0123456789abcdef";std::string result;result.reserve(count*2);for(auto b:bytes){result+=hex[b>>4];result+=hex[b&15];}return result;
 }
 struct identity{std::string id,key;};
+struct secret_text{std::string value;~secret_text(){if(!value.empty())SecureZeroMemory(value.data(),value.size());}};
+std::mutex identity_mutex;
 std::string machine_anchor(){
     constexpr DWORD rsmb=0x52534d42; // 'RSMB'
     UINT size=GetSystemFirmwareTable(rsmb,0,nullptr,0);
@@ -62,6 +65,7 @@ std::string machine_anchor(){
     return uuid;
 }
 identity get_identity(){
+    std::lock_guard<std::mutex> lock(identity_mutex);
     const auto anchor=machine_anchor();
     PSECURITY_DESCRIPTOR sd=nullptr;
     if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;KA;;;SY)(A;;KA;;;BA)",SDDL_REVISION_1,&sd,nullptr))throw std::runtime_error("security descriptor");
@@ -114,16 +118,22 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
 }
 }
 void run_agent(HANDLE stop_event){
-    RequestPipe website_requests(stop_event);
+    auto on_request=[](const std::string& payload)->std::string{
+        try{
+            auto server=get_server();if(server.empty())return "unavailable";auto ident=get_identity();
+            auto headers=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\nContent-Type: application/json\r\n";
+            bool unlock=payload.rfind("U:",0)==0;
+            secret_text body;body.value=unlock?"{\"password\":"+quoted(payload.substr(2))+"}":"{\"kind\":\"website\",\"object\":"+quoted(payload.substr(2))+"}";
+            auto r=request(server,L"POST",unlock?L"/api/device/unlock":L"/api/device/request",headers,body.value);
+            return r.status==201?"accepted":r.status==403?"denied":"unavailable";
+        }catch(const std::exception&){return "unavailable";}
+    };
+    RequestPipe website_requests(stop_event,on_request);
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
     std::set<std::string> queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
-        for(const auto& host:website_requests.take()){
-            auto name="W:"+host;auto now=GetTickCount64();auto it=last_request.find(name);
-            if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;queued.insert(name);}
-        }
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
             auto ident=get_identity();auto policy_text=cached_policy();bool online=false;
@@ -149,23 +159,25 @@ void run_agent(HANDLE stop_event){
                 const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");const auto& name_rules=p.at("program_names");
                 std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
                 if(p.at("block_local_files").boolean)domains.push_back("file://*");
-                if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 std::vector<std::string> names;for(const auto& item:name_rules.items)if(item.type==ohno_json::value::kind::string)names.push_back(item.text);
-                std::vector<std::string> allowed,network_allowed,site_allowed;
+                std::vector<std::string> allowed,network_allowed,site_allowed;bool paused=false;
                 std::vector<std::string> blocked;for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
                 if(online)for(const auto& grant:grants.items){
                     const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
                     if(kind.type==ohno_json::value::kind::string&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
-                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr))){if(kind.text=="application")allowed.push_back(object.text);else if(kind.text=="network")network_allowed.push_back(object.text);else if(kind.text=="website"&&ohno::valid_hostname(object.text))site_allowed.push_back("."+object.text);}}catch(const std::exception&){}
+                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr))){if(kind.text=="application")allowed.push_back(object.text);else if(kind.text=="network")network_allowed.push_back(object.text);else if(kind.text=="website"&&ohno::valid_hostname(object.text))site_allowed.push_back("."+object.text);else if(kind.text=="pause"&&object.text=="*")paused=true;}}catch(const std::exception&){}
                     }
                 }
+                if(paused)domains.clear();
+                if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
-                for(const auto& hash:stop_matching_processes(blocked,names,allowed)){
+                network.set_paused(paused);
+                if(!paused)for(const auto& hash:stop_matching_processes(blocked,names,allowed)){
                     auto now=GetTickCount64();auto it=last_request.find(hash);
                     if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert("A:"+hash);}
                 }
                 network.apply_grants(network_allowed);
-                for(const auto& app:observe_untrusted_programs()){
+                if(!paused)for(const auto& app:observe_untrusted_programs()){
                     if(std::find(network_allowed.begin(),network_allowed.end(),app.hash)!=network_allowed.end())continue;
                     if(network.register_untrusted(app.path,app.hash)){
                         auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);

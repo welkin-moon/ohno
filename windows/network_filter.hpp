@@ -9,6 +9,7 @@
 class NetworkFilter {
     struct Item { std::string hash; UINT64 v4=0,v6=0; bool blocked=false; };
     HANDLE engine_=nullptr;
+    bool paused_=false;
     GUID sublayer_{};
     std::map<std::wstring,Item> items_;
     bool add(const std::wstring&,Item&);
@@ -21,4 +22,5 @@ public:
     bool available() const {return engine_!=nullptr;}
     bool register_untrusted(const std::wstring& path,const std::string& hash);
     void apply_grants(const std::vector<std::string>& hashes);
+    void set_paused(bool paused);
 };

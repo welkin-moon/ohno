@@ -76,7 +76,7 @@ def main():
             time.sleep(20)
             if child.poll() is not None:raise RuntimeError('approved target was stopped')
             child.terminate();child.wait(timeout=5);child=None
-            subprocess.run([str(root/'pipe-client.exe'),'game.example'],check=True)
+            subprocess.run([str(root/'pipe-client.exe'),'W:game.example'],check=True)
             website=waitfor(lambda:next((x for x in read()['requests'] if x['kind']=='website' and x['object']=='game.example'),None),90)
             form('/request',{'csrf':csrf,'id':website['id'],'action':'approve'},cookie)
             def allowed_site():
@@ -99,7 +99,15 @@ def main():
                 result=subprocess.run([str(network_target),port],timeout=8)
                 return result.returncode==0
             waitfor(allowed_connect,90)
-            print('Windows service-to-teacher application, website and network approval tests passed')
+            subprocess.run([str(root/'pipe-client.exe'),'U:'+password],check=True)
+            waitfor(lambda:any(x['kind']=='pause' and x['device_id']==device for x in read()['requests']),30)
+            # The next policy refresh removes the managed domain block while paused.
+            def website_unblocked():
+                path=r'SOFTWARE\Policies\Microsoft\Edge\URLBlocklist'
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
+                    return all(winreg.EnumValue(registry,i)[1]!='game.example' for i in range(winreg.QueryInfoKey(registry)[1]))
+            waitfor(website_unblocked,90)
+            print('Windows service-to-teacher application, website, network and password-unlock tests passed')
         finally:
             cleanup_failed=False
             if child and child.poll() is None:child.terminate();child.wait(timeout=5)
