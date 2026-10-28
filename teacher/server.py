@@ -23,6 +23,7 @@ ITERATIONS = 310000
 HOSTNAME = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[A-Za-z0-9_-]{16,128}\Z')
+MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 PROGRAM_NAME = re.compile(r'[a-z0-9_. -]{1,128}\.exe\Z')
 DEFAULT_WEB = ['classic.minecraft.net', 'eaglercraft.com']
 DEFAULT_GAMES = ['plantsvszombies.exe','plantsvszombiesoriginal.exe','slaythespire.exe','gta3.exe','gta-vc.exe','gta_sa.exe','gtaiv.exe','minecraftlauncher.exe','minecraft.windows.exe']
@@ -34,6 +35,18 @@ def password_hash(password, salt):
 
 def esc(value):
     return html.escape(str(value), quote=True)
+
+
+def valid_mac(value):
+    # Canonical, nonzero unicast MAC; not a proof of device ownership.
+    if not isinstance(value, str) or not MAC.fullmatch(value): return False
+    return not (int(value[:2], 16) & 1) and value != '00:00:00:00:00:00'
+
+
+def mac_bound(dev):
+    # The device key still authenticates the client; MAC changes require teacher review.
+    bound = dev.get('bound_mac', '')
+    return bool(bound and bound in dev.get('macs', []))
 
 
 class Store:
@@ -114,7 +127,7 @@ class Store:
             dev = self.data['devices'].get(dev_id)
             if not dev or not isinstance(key, str) or not hmac.compare_digest(dev['key_hash'], hashlib.sha256(key.encode()).hexdigest()):
                 return None
-            if require_approved and not dev['approved']:
+            if require_approved and (not dev['approved'] or not mac_bound(dev)):
                 return None
             return dev
 
@@ -265,7 +278,18 @@ class Handler(BaseHTTPRequestHandler):
                 dev = self.store.data['devices'].get(one('id'))
                 if not dev or one('approved') not in ('0', '1'):
                     return self.reply(400, 'Unknown device')
-                dev['approved'] = one('approved') == '1'
+                if one('approved') == '1':
+                    primary = dev.get('primary_mac', '')
+                    if not valid_mac(primary) or primary not in dev.get('macs', []):
+                        return self.reply(400, 'No valid hardware MAC to bind')
+                    # A MAC conflict must be investigated, not silently auto-approved.
+                    for other_id, other in self.store.data['devices'].items():
+                        if other_id != one('id') and other.get('approved') and other.get('bound_mac') in dev.get('macs', []):
+                            return self.reply(409, 'MAC already bound to another approved device')
+                    dev['bound_mac'] = primary
+                    dev['approved'] = True
+                else:
+                    dev['approved'] = False
             elif self.path == '/request':
                 item = next((x for x in self.store.data['requests'] if x['id'] == one('id')), None)
                 if not item or item['state'] != 'pending' or one('action') not in ('approve', 'deny'):
@@ -280,21 +304,33 @@ class Handler(BaseHTTPRequestHandler):
     def register(self, data):
         dev_id, key, name = data.get('id'), data.get('key'), data.get('name')
         tun, wfp = data.get('tun'), data.get('wfp')
-        if (tun is not None and not isinstance(tun, bool)) or (wfp is not None and not isinstance(wfp, bool)): return self.json_reply(400, {'error': 'invalid status'})
+        macs, primary = data.get('macs', []), data.get('primary_mac', '')
+        if (tun is not None and not isinstance(tun, bool)) or (wfp is not None and not isinstance(wfp, bool)):
+            return self.json_reply(400, {'error': 'invalid status'})
         if not all(isinstance(x, str) for x in (dev_id, key, name)) or not ID.fullmatch(dev_id) or not ID.fullmatch(key) or not 1 <= len(name) <= 128:
             return self.json_reply(400, {'error': 'invalid device registration'})
+        if (not isinstance(macs, list) or len(macs) > 16 or
+                any(not valid_mac(x) for x in macs) or len(set(macs)) != len(macs) or
+                not isinstance(primary, str) or primary != (macs[0] if macs else '')):
+            return self.json_reply(400, {'error': 'invalid MAC inventory'})
         with self.store.lock:
             dev = self.store.data['devices'].get(dev_id)
             digest = hashlib.sha256(key.encode()).hexdigest()
+            now = int(time.time())
             if dev:
                 if not hmac.compare_digest(dev['key_hash'], digest):
                     return self.json_reply(403, {'error': 'device id already used'})
-                dev['last_seen'] = int(time.time()); dev['tun'] = tun; dev['wfp'] = wfp
+                dev.update(name=name, macs=macs, primary_mac=primary,
+                           last_ip=self.client_address[0], last_seen=now, tun=tun, wfp=wfp)
                 self.store.save()
-                return self.json_reply(200, {'approved': dev['approved']})
+                return self.json_reply(200, {'approved': bool(self.store.device(dev_id, key))})
             if len(self.store.data['devices']) >= 1000:
                 return self.json_reply(429, {'error': 'device capacity'})
-            self.store.data['devices'][dev_id] = {'name': name, 'key_hash': digest, 'approved': False, 'last_seen': int(time.time()), 'tun': tun, 'wfp': wfp}
+            self.store.data['devices'][dev_id] = {
+                'name': name, 'key_hash': digest, 'approved': False, 'bound_mac': '',
+                'macs': macs, 'primary_mac': primary, 'last_ip': self.client_address[0],
+                'last_seen': now, 'tun': tun, 'wfp': wfp
+            }
             self.store.save()
         return self.json_reply(201, {'approved': False})
 
