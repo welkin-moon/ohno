@@ -75,6 +75,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Verify Edge domain policy
+        shell: cmd
+        run: python tests\windows_edge_probe.py
       - name: Exercise teacher and native service together
         shell: cmd
         run: python tests\windows_end_to_end.py
