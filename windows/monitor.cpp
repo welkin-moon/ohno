@@ -44,13 +44,15 @@ void show_notice(DWORD pid){
     DWORD result=0;WTSSendMessageW(WTS_CURRENT_SERVER_HANDLE,session,title,static_cast<DWORD>(wcslen(title)*sizeof(wchar_t)),message,static_cast<DWORD>(wcslen(message)*sizeof(wchar_t)),MB_OK|MB_ICONINFORMATION,15,&result,FALSE);
 }
 }
-std::vector<std::string> stop_matching_processes(const std::vector<std::string>& blocked,DWORD only_pid){
-    std::vector<std::string> stopped;if(blocked.empty())return stopped;
+std::vector<std::string> stop_matching_processes(const std::vector<std::string>& blocked,const std::vector<std::string>& names,const std::vector<std::string>& allowed,DWORD only_pid){
+    std::vector<std::string> stopped;if(blocked.empty()&&names.empty())return stopped;
     handle snapshot{CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};if(snapshot.h==INVALID_HANDLE_VALUE)return stopped;
     PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);
     if(!Process32FirstW(snapshot.h,&entry))return stopped;
     do {
         DWORD pid=entry.th32ProcessID;if((only_pid&&pid!=only_pid)||pid==0||pid==4||pid==GetCurrentProcessId())continue;
+        bool named=false;for(const auto& n:names){std::wstring wide(n.begin(),n.end());if(_wcsicmp(entry.szExeFile,wide.c_str())==0){named=true;break;}}
+        if(!named&&blocked.empty())continue;
         handle proc{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_TERMINATE,FALSE,pid)};if(!proc.h)continue;
         std::vector<wchar_t> path(32768);DWORD length=static_cast<DWORD>(path.size());
         if(!QueryFullProcessImageNameW(proc.h,0,path.data(),&length))continue;
@@ -58,7 +60,8 @@ std::vector<std::string> stop_matching_processes(const std::vector<std::string>&
         // Do not terminate operating-system processes even if configured by mistake.
         wchar_t root[MAX_PATH]{};UINT n=GetWindowsDirectoryW(root,MAX_PATH);
         if(n>0&&n<MAX_PATH&&image.size()>n&&_wcsnicmp(image.c_str(),root,n)==0&&(image[n]==L'\\'||image[n]==L'/'))continue;
-        auto hash=file_hash(image);if(hash.empty()||std::find(blocked.begin(),blocked.end(),hash)==blocked.end())continue;
+        auto hash=file_hash(image);if(hash.empty()||std::find(allowed.begin(),allowed.end(),hash)!=allowed.end())continue;
+        if(!named&&std::find(blocked.begin(),blocked.end(),hash)==blocked.end())continue;
         if(TerminateProcess(proc.h,ERROR_ACCESS_DISABLED_BY_POLICY)){stopped.push_back(hash);show_notice(pid);}
     }while(Process32NextW(snapshot.h,&entry));
     return stopped;

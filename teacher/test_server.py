@@ -9,7 +9,7 @@ import threading
 import unittest
 from pathlib import Path
 from urllib.parse import urlencode
-from server import Handler, Store
+from server import Handler, Store, create_certificate
 from http.server import ThreadingHTTPServer
 
 
@@ -45,7 +45,7 @@ class TeacherIntegration(unittest.TestCase):
         csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
         status, _, _ = self.req('POST','/policy',urlencode({'csrf':'wrong','domains':'games.example'}),{'Cookie':cookie});self.assertEqual(status,403)
         status, _, _ = self.req('POST','/policy',urlencode({'csrf':csrf,'domains':'games.example\nbad domain','hashes':''}),{'Cookie':cookie});self.assertEqual(status,400)
-        status, _, _ = self.req('POST','/policy',urlencode({'csrf':csrf,'domains':'games.example','hashes':'a'*64}),{'Cookie':cookie});self.assertEqual(status,303)
+        status, _, _ = self.req('POST','/policy',urlencode({'csrf':csrf,'domains':'games.example','hashes':'a'*64,'names':'gta3.exe'}),{'Cookie':cookie});self.assertEqual(status,303)
         dev='A'*24;key='B'*32
         data=json.dumps({'id':dev,'key':key,'name':'<school-pc>'})
         status, _, text=self.req('POST','/api/device/register',data);self.assertEqual(status,201);self.assertFalse(json.loads(text)['approved'])
@@ -53,7 +53,7 @@ class TeacherIntegration(unittest.TestCase):
         self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],403)
         status, _, page=self.req('GET','/',headers={'Cookie':cookie});self.assertIn('&lt;school-pc&gt;',page)
         status, _, _=self.req('POST','/device',urlencode({'csrf':csrf,'id':dev,'approved':'1'}),{'Cookie':cookie});self.assertEqual(status,303)
-        status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['web_domains'],['games.example'])
+        status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['web_domains'],['games.example']);self.assertEqual(json.loads(body)['program_names'],['gta3.exe'])
         status, _, body=self.req('POST','/api/device/request',json.dumps({'kind':'website','object':'games.example'}),auth);self.assertEqual(status,201);request_id=json.loads(body)['id']
         status, _, _=self.req('POST','/request',urlencode({'csrf':csrf,'id':request_id,'action':'approve'}),{'Cookie':cookie});self.assertEqual(status,303)
         status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['grants'][0]['object'],'games.example')
@@ -61,6 +61,13 @@ class TeacherIntegration(unittest.TestCase):
         status, _, _=self.req('POST','/device',urlencode({'csrf':csrf,'id':dev,'approved':'0'}),{'Cookie':cookie});self.assertEqual(status,303)
         self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],403)
         saved=json.loads(Path(self.store.path).read_text()); self.assertNotIn(key, json.dumps(saved)); self.assertNotIn('a-strong-test-password',json.dumps(saved))
+
+    def test_certificate_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cert=Path(temp)/'cert.pem';key=Path(temp)/'key.pem'
+            create_certificate(cert,key,'localhost')
+            context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(cert,key)
+            with self.assertRaises(FileExistsError):create_certificate(cert,key,'localhost')
 
     def test_state_no_overwrite(self):
         with self.assertRaises(FileExistsError): Store.initialize(self.store.path,'another-strong-password')

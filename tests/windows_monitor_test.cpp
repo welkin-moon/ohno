@@ -10,7 +10,7 @@ int main(int argc,char** argv){
     if(!CreateProcessW(L"test-target.exe",command,nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&pi))return 3;
     CloseHandle(pi.hThread);
     Sleep(500);
-    auto result=stop_matching_processes({std::string(argv[1])},pi.dwProcessId);
+    auto result=stop_matching_processes({std::string(argv[1])},{},{},pi.dwProcessId);
     bool dead=WaitForSingleObject(pi.hProcess,2000)==WAIT_OBJECT_0;
     if(!dead)TerminateProcess(pi.hProcess,1);
     CloseHandle(pi.hProcess);

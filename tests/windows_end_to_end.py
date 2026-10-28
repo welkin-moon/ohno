@@ -65,7 +65,7 @@ def main():
             csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
             form('/device',{'csrf':csrf,'id':device,'approved':'1'},cookie)
             file_hash=hashlib.sha256(target.read_bytes()).hexdigest()
-            form('/policy',{'csrf':csrf,'domains':'','hashes':file_hash},cookie)
+            form('/policy',{'csrf':csrf,'domains':'','hashes':file_hash,'names':''},cookie)
             child=subprocess.Popen([str(target)])
             waitfor(lambda:child.poll() is not None,120)
             request=waitfor(lambda:next((x for x in read()['requests'] if x['object']==file_hash),None),90)

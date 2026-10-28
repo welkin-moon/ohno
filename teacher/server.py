@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import html
 import json
 import os
@@ -22,6 +23,8 @@ ITERATIONS = 310000
 HOSTNAME = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[A-Za-z0-9_-]{16,128}\Z')
+PROGRAM_NAME = re.compile(r'[a-z0-9_. -]{1,128}\.exe\Z')
+DEFAULT_GAMES = ['plantsvszombies.exe','plantsvszombiesoriginal.exe','slaythespire.exe','gta3.exe','gta-vc.exe','gta_sa.exe','gtaiv.exe','minecraftlauncher.exe','minecraft.windows.exe']
 
 
 def password_hash(password, salt):
@@ -52,7 +55,7 @@ class Store:
         p.parent.mkdir(parents=True, exist_ok=True)
         salt = secrets.token_hex(16)
         state = {'version': 1, 'salt': salt, 'password_hash': password_hash(password, salt),
-                 'policy_revision': 0, 'web_domains': [], 'program_hashes': [],
+                 'policy_revision': 0, 'web_domains': [], 'program_hashes': [], 'program_names': DEFAULT_GAMES[:],
                  'devices': {}, 'requests': []}
         # Exclusive creation prevents accidental overwrite.
         fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -173,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply(403, {'error': 'not authorized or pending'})
                 d = self.store.data
                 grants = [dict(id=x['id'], kind=x['kind'], object=x['object'], expires=x.get('expires',0)) for x in d['requests'] if x['device_id'] == dev_id and x['state'] == 'approved' and x.get('expires',0) > time.time()]
-                return self.json_reply(200, {'revision': d['policy_revision'], 'web_domains': d['web_domains'], 'program_hashes': d['program_hashes'], 'grants': grants})
+                return self.json_reply(200, {'revision': d['policy_revision'], 'web_domains': d['web_domains'], 'program_hashes': d['program_hashes'], 'program_names': d.get('program_names', []), 'grants': grants})
         if self.path != '/':
             return self.reply(404, 'Not found')
         csrf = self.store.session(self.cookie())
@@ -185,6 +188,7 @@ class Handler(BaseHTTPRequestHandler):
             requests = list(d['requests'])[-100:][::-1]
             domains = '\n'.join(d['web_domains'])
             hashes = '\n'.join(d['program_hashes'])
+            names = '\n'.join(d.get('program_names', []))
             revision = d['policy_revision']
         hidden = '<input type="hidden" name="csrf" value="' + esc(csrf) + '">'
         rows = []
@@ -198,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
                 action = '<form method="post" action="/request">' + hidden + '<input type="hidden" name="id" value="' + esc(item['id']) + '"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>'
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item['object']) + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
-        content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><button>保存规则</button></form></section>'
+        content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><button>保存规则</button></form></section>'
         content += '<section><h2>设备</h2><table><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         return self.page('ohno 教师端', content)
@@ -241,9 +245,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/policy':
                 domains = sorted(set(x.strip().lower() for x in one('domains').splitlines() if x.strip()))
                 hashes = sorted(set(x.strip().lower() for x in one('hashes').splitlines() if x.strip()))
-                if len(domains) > 1000 or len(hashes) > 1000 or any(not HOSTNAME.fullmatch(x) for x in domains) or any(not HASH.fullmatch(x) for x in hashes):
+                names = sorted(set(x.strip().lower() for x in one('names').splitlines() if x.strip()))
+                if len(domains) > 1000 or len(hashes) > 1000 or len(names) > 1000 or any(not HOSTNAME.fullmatch(x) for x in domains) or any(not HASH.fullmatch(x) for x in hashes) or any(not PROGRAM_NAME.fullmatch(x) for x in names):
                     return self.reply(400, 'Invalid domains or SHA-256 values')
-                self.store.data.update(web_domains=domains, program_hashes=hashes, policy_revision=self.store.data['policy_revision']+1)
+                self.store.data.update(web_domains=domains, program_hashes=hashes, program_names=names, policy_revision=self.store.data['policy_revision']+1)
             elif self.path == '/device':
                 dev = self.store.data['devices'].get(one('id'))
                 if not dev or one('approved') not in ('0', '1'):
@@ -294,15 +299,59 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(201, {'id': item['id']})
 
 
+def create_certificate(cert_path, key_path, host):
+    """Create a school-controlled local HTTPS certificate; never overwrite keys."""
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+    cert_path, key_path = Path(cert_path), Path(key_path)
+    if cert_path.exists() or key_path.exists(): raise FileExistsError('certificate or key already exists')
+    try:
+        alt = x509.IPAddress(ipaddress.ip_address(host))
+    except ValueError:
+        host = host.encode('idna').decode('ascii').lower()
+        if not HOSTNAME.fullmatch(host): raise ValueError('invalid server hostname')
+        alt = x509.DNSName(host)
+    private = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(timezone.utc)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(private.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now-timedelta(minutes=5))
+            .not_valid_after(now+timedelta(days=825)).add_extension(x509.SubjectAlternativeName([alt]),critical=False)
+            .add_extension(x509.BasicConstraints(ca=True,path_length=0),critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),critical=False)
+            .sign(private,hashes.SHA256()))
+    for path in (cert_path,key_path): path.parent.mkdir(parents=True,exist_ok=True)
+    key_bytes=private.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption())
+    key_fd=os.open(str(key_path),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    try:
+        with os.fdopen(key_fd,'wb') as f: f.write(key_bytes)
+        cert_fd=os.open(str(cert_path),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o644)
+        with os.fdopen(cert_fd,'wb') as f: f.write(cert.public_bytes(serialization.Encoding.PEM))
+    except Exception:
+        key_path.unlink(missing_ok=True)
+        raise
+
+
 def main():
     p = argparse.ArgumentParser(description='ohno teacher HTTPS service')
-    p.add_argument('--state', required=True, help='Path to private writable state file')
+    p.add_argument('--state', help='Path to private writable state file')
     p.add_argument('--init', action='store_true', help='Create state and teacher password interactively')
+    p.add_argument('--generate-certificate', action='store_true', help='Generate a local HTTPS certificate')
+    p.add_argument('--host', help='Hostname or IP for certificate')
     p.add_argument('--cert', help='PEM certificate')
     p.add_argument('--key', help='PEM private key')
     p.add_argument('--bind', default='127.0.0.1')
     p.add_argument('--port', type=int, default=8443)
     args = p.parse_args()
+    if args.generate_certificate:
+        if not args.cert or not args.key or not args.host: p.error('--cert, --key and --host are required')
+        create_certificate(args.cert, args.key, args.host)
+        print('Certificate created. Protect the private key and install the certificate only on managed devices.')
+        return
+    if not args.state: p.error('--state is required')
     if args.init:
         import getpass
         first = getpass.getpass('Teacher password (12+ chars): ')

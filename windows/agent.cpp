@@ -85,7 +85,7 @@ void save_policy(const std::string& value){
     if(RegSetValueExW(key.h,L"Policy",0,REG_BINARY,reinterpret_cast<const BYTE*>(value.data()),static_cast<DWORD>(value.size()))!=ERROR_SUCCESS)throw std::runtime_error("policy save");
 }
 void validate_policy(const ohno_json::value& p){
-    if(p.at("program_hashes").type!=ohno_json::value::kind::array||p.at("grants").type!=ohno_json::value::kind::array||p.at("web_domains").type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
+    if(p.at("program_hashes").type!=ohno_json::value::kind::array||p.at("grants").type!=ohno_json::value::kind::array||p.at("web_domains").type!=ohno_json::value::kind::array||p.at("program_names").type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
 }
 std::wstring get_server(){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};
@@ -136,17 +136,19 @@ void run_agent(HANDLE stop_event){
             }catch(const std::exception&){debug(L"ohno: offline; applying cached policy\n");}
             if(!policy_text.empty()){
                 auto p=ohno_json::parse(policy_text);validate_policy(p);
-                const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");
+                const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");const auto& name_rules=p.at("program_names");
                 std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
+                std::vector<std::string> names;for(const auto& item:name_rules.items)if(item.type==ohno_json::value::kind::string)names.push_back(item.text);
+                std::vector<std::string> allowed;
                 std::vector<std::string> blocked;for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
                 if(online)for(const auto& grant:grants.items){
                     const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
                     if(kind.type==ohno_json::value::kind::string&&kind.text=="application"&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
-                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr)))blocked.erase(std::remove(blocked.begin(),blocked.end(),object.text),blocked.end());}catch(const std::exception&){}
+                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr)))allowed.push_back(object.text);}catch(const std::exception&){}
                     }
                 }
-                for(const auto& hash:stop_matching_processes(blocked)){
+                for(const auto& hash:stop_matching_processes(blocked,names,allowed)){
                     auto now=GetTickCount64();auto it=last_request.find(hash);
                     if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert(hash);}
                 }
