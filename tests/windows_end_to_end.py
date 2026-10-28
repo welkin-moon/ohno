@@ -61,6 +61,8 @@ def main():
             def read():return json.loads(state.read_text('utf-8'))
             device=waitfor(lambda:next(iter(read()['devices']),None),90)
             waitfor(lambda:read()['devices'][device].get('tun') is True,90)
+            first_mac=waitfor(lambda:read()['devices'][device].get('primary_mac'),45)
+            if first_mac not in read()['devices'][device]['macs']: raise RuntimeError('inconsistent MAC inventory')
             adapter=subprocess.run(['powershell','-NoProfile','-Command',"if (Get-NetAdapter -Name 'ohno-tun' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"])
             if adapter.returncode:raise RuntimeError('TUN adapter not found')
             status,headers,_=call('POST','/login',urlencode({'password':password}));assert status==303
@@ -68,6 +70,7 @@ def main():
             status,_,page=call('GET','/',headers={'Cookie':cookie});assert status==200
             csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
             form('/device',{'csrf':csrf,'id':device,'approved':'1'},cookie)
+            if read()['devices'][device]['bound_mac']!=first_mac: raise RuntimeError('device MAC was not bound')
             file_hash=hashlib.sha256(target.read_bytes()).hexdigest()
             form('/policy',{'csrf':csrf,'domains':'game.example','hashes':file_hash,'names':''},cookie)
             child=subprocess.Popen([str(target)])
