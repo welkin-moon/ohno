@@ -21,5 +21,7 @@ int main(){
  assert(RegOpenKeyExW(HKEY_CURRENT_USER,target.c_str(),0,KEY_READ,&key)==ERROR_SUCCESS);DWORD count=0;assert(RegQueryInfoKeyW(key,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,&count,nullptr,nullptr,nullptr,nullptr)==ERROR_SUCCESS);assert(count==2);
  wchar_t value[128]{};DWORD size=sizeof(value);assert(RegQueryValueExW(key,L"1",nullptr,nullptr,reinterpret_cast<BYTE*>(value),&size)==ERROR_SUCCESS);assert(std::wstring(value)==L"school.example");size=sizeof(value);assert(RegQueryValueExW(key,L"3",nullptr,nullptr,reinterpret_cast<BYTE*>(value),&size)==ERROR_SUCCESS);assert(std::wstring(value)==L"managed-elsewhere.example");RegCloseKey(key);
  assert(!apply_browser_policy_at(HKEY_CURRENT_USER,target,tracker,{"bad domain"}));
+ assert(apply_browser_policy_at(HKEY_CURRENT_USER,target,tracker,{"file://*"}));
+ assert(apply_browser_policy_at(HKEY_CURRENT_USER,target,tracker,{}));
  RegDeleteTreeW(HKEY_CURRENT_USER,base.c_str());std::puts("browser policy tests passed");
 }

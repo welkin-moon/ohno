@@ -90,6 +90,13 @@ std::vector<UntrustedProgram> observe_untrusted_programs(){
         handle proc{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,e.th32ProcessID)};if(!proc.h)continue;
         std::vector<wchar_t> buffer(32768);DWORD n=static_cast<DWORD>(buffer.size());if(!QueryFullProcessImageNameW(proc.h,0,buffer.data(),&n))continue;
         std::wstring path(buffer.data(),n);if(!is_removable(path)&&!has_download_zone(path))continue;
-        auto hash=file_hash(path);if(!hash.empty())out.push_back({path,hash});
+        auto hash=file_hash(path);if(!hash.empty())out.push_back({path,hash,e.th32ProcessID});
     }while(Process32NextW(snapshot.h,&e));return out;
+}
+
+void notify_network_block(DWORD pid){
+    DWORD session=0;if(!ProcessIdToSessionId(pid,&session)||session==0)return;
+    wchar_t title[]=L"ohno 课堂助手";
+    wchar_t message[]=L"检测到来自下载或可移动磁盘的程序。其新的联网请求已受限制，可联系教师审批。";
+    DWORD result=0;WTSSendMessageW(WTS_CURRENT_SERVER_HANDLE,session,title,static_cast<DWORD>(wcslen(title)*sizeof(wchar_t)),message,static_cast<DWORD>(wcslen(message)*sizeof(wchar_t)),MB_OK|MB_ICONINFORMATION,15,&result,FALSE);
 }

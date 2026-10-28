@@ -28,22 +28,24 @@ def main():
             def run(address,idx):
                 args=[str(edge),'--headless','--disable-gpu','--no-first-run','--disable-background-networking','--user-data-dir='+str(Path(tmp)/('profile'+str(idx))),'--dump-dom',address]
                 result=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45)
-                return result.stdout.decode('utf-8','replace')
+                return result.stdout.decode('utf-8','replace'),result.stderr.decode('utf-8','replace'),result.returncode
             url='http://localhost:%d/'%server.server_port
             winreg.DeleteValue(browser_key,'1') if previous else None
-            if MARKER not in run(url,0):raise RuntimeError('Baseline local page did not load in Edge')
+            if MARKER not in run(url,0)[0]:raise RuntimeError('Baseline local page did not load in Edge')
             winreg.SetValueEx(browser_key,'1',0,winreg.REG_SZ,'localhost')
-            blocked=run(url,1)
+            blocked,errors,code=run(url,1)
             if MARKER in blocked:raise RuntimeError('Edge URLBlocklist did not block localhost')
-            if '<html' not in blocked.lower():raise RuntimeError('Blocked page could not be distinguished from browser failure')
+            print('Edge blocked exit:',code,'stderr:',errors[-3000:])
+            if 'ERR_BLOCKED_BY_ADMINISTRATOR' not in (blocked+errors):raise RuntimeError('Could not confirm browser policy as the block reason')
             print('Edge domain policy blocked the local page')
             local=Path(tmp)/'local.html';local.write_text('<title>'+MARKER+'</title>',encoding='utf-8')
             local_url=local.as_uri()
-            if MARKER not in run(local_url,9):raise RuntimeError('Baseline local file did not load in Edge')
+            if MARKER not in run(local_url,9)[0]:raise RuntimeError('Baseline local file did not load in Edge')
             for i,pattern in enumerate(['file://*','file:///*','file:*'],2):
                 winreg.SetValueEx(browser_key,'1',0,winreg.REG_SZ,pattern)
-                output=run(local_url,i)
-                print('local pattern %s: %s'%(pattern,'BLOCKED' if MARKER not in output else 'NOT BLOCKED'))
+                output,errors,code=run(local_url,i)
+                verdict='BLOCKED' if 'ERR_BLOCKED_BY_ADMINISTRATOR' in (output+errors) else ('NOT BLOCKED' if MARKER in output else 'UNKNOWN')
+                print('local pattern %s: %s (exit %s; stderr %s)'%(pattern,verdict,code,errors[-1200:]))
         finally:
             if previous:winreg.SetValueEx(browser_key,'1',0,previous[1],previous[0])
             else:

@@ -56,7 +56,7 @@ class Store:
         p.parent.mkdir(parents=True, exist_ok=True)
         salt = secrets.token_hex(16)
         state = {'version': 1, 'salt': salt, 'password_hash': password_hash(password, salt),
-                 'policy_revision': 0, 'web_domains': DEFAULT_WEB[:], 'program_hashes': [], 'program_names': DEFAULT_GAMES[:],
+                 'policy_revision': 0, 'web_domains': DEFAULT_WEB[:], 'program_hashes': [], 'program_names': DEFAULT_GAMES[:], 'block_local_files': False,
                  'devices': {}, 'requests': []}
         # Exclusive creation prevents accidental overwrite.
         fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -177,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply(403, {'error': 'not authorized or pending'})
                 d = self.store.data
                 grants = [dict(id=x['id'], kind=x['kind'], object=x['object'], expires=x.get('expires',0)) for x in d['requests'] if x['device_id'] == dev_id and x['state'] == 'approved' and x.get('expires',0) > time.time()]
-                return self.json_reply(200, {'revision': d['policy_revision'], 'web_domains': d['web_domains'], 'program_hashes': d['program_hashes'], 'program_names': d.get('program_names', []), 'grants': grants})
+                return self.json_reply(200, {'revision': d['policy_revision'], 'web_domains': d['web_domains'], 'program_hashes': d['program_hashes'], 'program_names': d.get('program_names', []), 'block_local_files': d.get('block_local_files', False), 'grants': grants})
         if self.path != '/':
             return self.reply(404, 'Not found')
         csrf = self.store.session(self.cookie())
@@ -190,6 +190,7 @@ class Handler(BaseHTTPRequestHandler):
             domains = '\n'.join(d['web_domains'])
             hashes = '\n'.join(d['program_hashes'])
             names = '\n'.join(d.get('program_names', []))
+            block_local_files = d.get('block_local_files', False)
             revision = d['policy_revision']
         hidden = '<input type="hidden" name="csrf" value="' + esc(csrf) + '">'
         rows = []
@@ -203,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                 action = '<form method="post" action="/request">' + hidden + '<input type="hidden" name="id" value="' + esc(item['id']) + '"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>'
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item['object']) + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
-        content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><button>保存规则</button></form></section>'
+        content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件（可能影响本地课件及 PDF，覆盖不保证）</label></p><button>保存规则</button></form></section>'
         content += '<section><h2>设备</h2><table><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         content += '<p><small>ohno 是自由软件：<a href="https://github.com/welkin-moon/ohno">查看源码与许可证</a></small></p>'
@@ -250,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
                 names = sorted(set(x.strip().lower() for x in one('names').splitlines() if x.strip()))
                 if len(domains) > 1000 or len(hashes) > 1000 or len(names) > 1000 or any(not HOSTNAME.fullmatch(x) for x in domains) or any(not HASH.fullmatch(x) for x in hashes) or any(not PROGRAM_NAME.fullmatch(x) for x in names):
                     return self.reply(400, 'Invalid domains or SHA-256 values')
-                self.store.data.update(web_domains=domains, program_hashes=hashes, program_names=names, policy_revision=self.store.data['policy_revision']+1)
+                self.store.data.update(web_domains=domains, program_hashes=hashes, program_names=names, block_local_files=(one('block_local_files') == '1'), policy_revision=self.store.data['policy_revision']+1)
             elif self.path == '/device':
                 dev = self.store.data['devices'].get(one('id'))
                 if not dev or one('approved') not in ('0', '1'):

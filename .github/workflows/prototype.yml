@@ -52,6 +52,10 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_target.cpp /Fe:test-target.exe
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_origin_test.cpp windows\monitor.cpp /Fe:origin-test.exe bcrypt.lib wtsapi32.lib
+          if errorlevel 1 exit /b 1
+          origin-test.exe
+          if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_monitor_test.cpp windows\monitor.cpp /Fe:monitor-test.exe bcrypt.lib wtsapi32.lib
           if errorlevel 1 exit /b 1
           for /f %%h in ('powershell -NoProfile -Command "(Get-FileHash test-target.exe -Algorithm SHA256).Hash.ToLower()"') do set "HASH=%%h"

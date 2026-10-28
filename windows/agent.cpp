@@ -86,7 +86,7 @@ void save_policy(const std::string& value){
     if(RegSetValueExW(key.h,L"Policy",0,REG_BINARY,reinterpret_cast<const BYTE*>(value.data()),static_cast<DWORD>(value.size()))!=ERROR_SUCCESS)throw std::runtime_error("policy save");
 }
 void validate_policy(const ohno_json::value& p){
-    if(p.at("program_hashes").type!=ohno_json::value::kind::array||p.at("grants").type!=ohno_json::value::kind::array||p.at("web_domains").type!=ohno_json::value::kind::array||p.at("program_names").type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
+    if(p.at("program_hashes").type!=ohno_json::value::kind::array||p.at("grants").type!=ohno_json::value::kind::array||p.at("web_domains").type!=ohno_json::value::kind::array||p.at("program_names").type!=ohno_json::value::kind::array||p.at("block_local_files").type!=ohno_json::value::kind::boolean)throw std::runtime_error("invalid policy");
 }
 std::wstring get_server(){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};
@@ -141,6 +141,7 @@ void run_agent(HANDLE stop_event){
                 auto p=ohno_json::parse(policy_text);validate_policy(p);
                 const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");const auto& name_rules=p.at("program_names");
                 std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
+                if(p.at("block_local_files").boolean)domains.push_back("file://*");
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 std::vector<std::string> names;for(const auto& item:name_rules.items)if(item.type==ohno_json::value::kind::string)names.push_back(item.text);
                 std::vector<std::string> allowed,network_allowed;
@@ -160,7 +161,7 @@ void run_agent(HANDLE stop_event){
                     if(std::find(network_allowed.begin(),network_allowed.end(),app.hash)!=network_allowed.end())continue;
                     if(network.register_untrusted(app.path,app.hash)){
                         auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);
-                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;queued.insert(name);}
+                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;queued.insert(name);notify_network_block(app.pid);}
                     }
                 }
             }
