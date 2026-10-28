@@ -3,9 +3,9 @@
 #define _WIN32_WINNT 0x0A00 // Target the Windows 10 IP Helper interfaces.
 #endif
 #include <winsock2.h>
+#include <ws2tcpip.h> // netioapi.h requires ws2ipdef.h to expose MIB_IF_ROW2
 #include <windows.h>
 #include <iphlpapi.h>
-#include <netioapi.h>
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <sddl.h>
