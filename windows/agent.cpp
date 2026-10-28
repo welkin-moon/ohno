@@ -7,6 +7,10 @@
 #include <vector>
 #include <stdexcept>
 #include "agent.hpp"
+#include "monitor.hpp"
+#include <algorithm>
+#include <ctime>
+#include <map>
 #include "../src/json.hpp"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
@@ -76,6 +80,7 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
 }
 }
 void run_agent(HANDLE stop_event){
+    std::map<std::string, ULONGLONG> last_request;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
@@ -88,7 +93,26 @@ void run_agent(HANDLE stop_event){
                 if(approved.type==ohno_json::value::kind::boolean&&approved.boolean){
                     auto h=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\n";
                     auto policy=request(server,L"GET",L"/api/device/policy",h,{});
-                    if(policy.status==200){auto p=ohno_json::parse(policy.body);(void)p.at("revision");debug(L"ohno: received policy; enforcement not implemented\n");}
+                    if(policy.status==200){
+                        auto p=ohno_json::parse(policy.body);
+                        const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");
+                        if(rules.type!=ohno_json::value::kind::array||grants.type!=ohno_json::value::kind::array)throw std::runtime_error("invalid policy");
+                        std::vector<std::string> blocked;
+                        for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
+                        for(const auto& grant:grants.items){
+                            const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
+                            if(kind.type==ohno_json::value::kind::string&&kind.text=="application"&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
+                                try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr)))blocked.erase(std::remove(blocked.begin(),blocked.end(),object.text),blocked.end());}catch(const std::exception&){}
+                            }
+                        }
+                        for(const auto& hash:stop_matching_processes(blocked)){
+                            auto now=GetTickCount64();auto it=last_request.find(hash);
+                            if(it!=last_request.end()&&now-it->second<60000)continue;
+                            last_request[hash]=now;
+                            auto body="{\"kind\":\"application\",\"object\":"+quoted(hash)+"}";
+                            request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
+                        }
+                    }
                 }
             }
         }catch(const std::exception&){debug(L"ohno: registration or polling failed; retrying\n");}
