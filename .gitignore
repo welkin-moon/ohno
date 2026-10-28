@@ -7,3 +7,4 @@ policy-test
 state.json
 *.pem
 *.key
+json-test
