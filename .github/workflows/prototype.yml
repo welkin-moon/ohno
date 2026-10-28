@@ -41,9 +41,13 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
           if not defined VSDIR exit /b 1
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\mac_identity_test.cpp /Fe:mac-identity-test.exe
+          if errorlevel 1 exit /b 1
+          mac-identity-test.exe
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_test.cpp windows\request_pipe.cpp src\policy.cpp /Fe:pipe-test.exe advapi32.lib
           if errorlevel 1 exit /b 1
@@ -136,7 +140,7 @@ jobs:
             dist/ohno-teacher.exe
             dist/licenses
   publish-prerelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v0.1.0-alpha.1]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v0.1.0-alpha.2]')
     needs: [linux, windows-build]
     runs-on: ubuntu-latest
     permissions:
@@ -163,4 +167,4 @@ jobs:
           cp windows/wintun-LICENSE.txt release/client/wintun-LICENSE.txt
           (cd release/client && zip -q ../ohno-client-windows-x64.zip ohno-setup.exe trial-guide.md AGPL-3.0.txt sing-box-LICENSE.txt wintun-LICENSE.txt)
           (cd release/teacher && zip -qr ../ohno-teacher-windows-x64.zip ohno-teacher.exe licenses trial-guide.md AGPL-3.0.txt)
-          gh release create v0.1.0-alpha.1 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.1" --notes-file docs/release-notes.md release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip
+          gh release create v0.1.0-alpha.2 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.2" --notes-file docs/release-notes.md release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip

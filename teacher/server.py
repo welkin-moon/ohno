@@ -23,6 +23,7 @@ ITERATIONS = 310000
 HOSTNAME = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[A-Za-z0-9_-]{16,128}\Z')
+MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 PROGRAM_NAME = re.compile(r'[a-z0-9_. -]{1,128}\.exe\Z')
 DEFAULT_WEB = ['classic.minecraft.net', 'eaglercraft.com']
 DEFAULT_GAMES = ['plantsvszombies.exe','plantsvszombiesoriginal.exe','slaythespire.exe','gta3.exe','gta-vc.exe','gta_sa.exe','gtaiv.exe','minecraftlauncher.exe','minecraft.windows.exe']
@@ -34,6 +35,18 @@ def password_hash(password, salt):
 
 def esc(value):
     return html.escape(str(value), quote=True)
+
+
+def valid_mac(value):
+    # Canonical, nonzero unicast MAC; not a proof of device ownership.
+    if not isinstance(value, str) or not MAC.fullmatch(value): return False
+    return not (int(value[:2], 16) & 1) and value != '00:00:00:00:00:00'
+
+
+def mac_bound(dev):
+    # The device key still authenticates the client; MAC changes require teacher review.
+    bound = dev.get('bound_mac', '')
+    return bool(bound and bound in dev.get('macs', []))
 
 
 class Store:
@@ -114,7 +127,7 @@ class Store:
             dev = self.data['devices'].get(dev_id)
             if not dev or not isinstance(key, str) or not hmac.compare_digest(dev['key_hash'], hashlib.sha256(key.encode()).hexdigest()):
                 return None
-            if require_approved and not dev['approved']:
+            if require_approved and (not dev['approved'] or not mac_bound(dev)):
                 return None
             return dev
 
@@ -202,8 +215,30 @@ class Handler(BaseHTTPRequestHandler):
         hidden = '<input type="hidden" name="csrf" value="' + esc(csrf) + '">'
         rows = []
         for dev_id, dev in devices:
-            action = '<form method="post" action="/device">' + hidden + '<input type="hidden" name="id" value="' + esc(dev_id) + '"><button name="approved" value="' + ('0' if dev['approved'] else '1') + '">' + ('停用' if dev['approved'] else '批准设备') + '</button></form>'
-            rows.append('<tr><td>' + esc(dev['name']) + '</td><td>' + esc(dev_id[:12]) + '</td><td>' + ('已批准' if dev['approved'] else '待批准') + ' / ' + ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') + ' / TUN 进程: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') + ' / WFP 引擎: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') + '</td><td>' + action + '</td></tr>')
+            active = dev['approved'] and mac_bound(dev)
+            macs = dev.get('macs', [])
+            bound = dev.get('bound_mac', '')
+            collision = any(other_id != dev_id and other.get('approved') and
+                            other.get('bound_mac') in macs for other_id, other in devices)
+            if active: status = '已批准'
+            elif dev['approved']: status = 'MAC 变更，需核验并重新绑定'
+            else: status = '待批准'
+            if collision: status += ' / MAC 冲突'
+            commands = ''
+            if dev.get('primary_mac') and not active:
+                commands += '<button name="approved" value="1">' + ('重新绑定' if dev['approved'] else '批准并绑定 MAC') + '</button> '
+            if dev['approved']: commands += '<button name="approved" value="0">停用</button>'
+            if not dev.get('primary_mac'): commands += '<small>没有可绑定的 MAC，检查网卡</small>'
+            action = '<form method="post" action="/device">' + hidden + '<input type="hidden" name="id" value="' + esc(dev_id) + '">' + commands + '</form>'
+            mac_text = '<strong>' + esc(bound or '未绑定') + '</strong><small> 当前: ' + esc(dev.get('primary_mac') or '未知') + '</small>'
+            if len(macs) > 1: mac_text += '<small> 其他: ' + esc(', '.join(macs[1:])) + '</small>'
+            rows.append('<tr><td>' + esc(dev['name']) + '</td><td>' + esc(dev_id[:12]) +
+                        '</td><td>' + mac_text + '</td><td>' + esc(dev.get('last_ip') or '未知') +
+                        '</td><td>' + status + ' / ' +
+                        ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') +
+                        ' / TUN 进程: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') +
+                        ' / WFP 引擎: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') +
+                        '</td><td>' + action + '</td></tr>')
         req_rows = []
         for item in requests:
             action = ''
@@ -212,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
         content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件（可能影响本地课件及 PDF，覆盖不保证）</label></p><button>保存规则</button></form></section>'
-        content += '<section><h2>设备</h2><table><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
+        content += '<section><h2>设备</h2><p><small>MAC 在教师审批时绑定；IP 仅作当前连接参考，变动不影响身份。MAC 可伪造，实际认证仍要求设备密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>已绑定 / 发现 MAC</th><th>最近连接 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         content += '<p><small>ohno 是自由软件：<a href="https://github.com/welkin-moon/ohno">查看源码与许可证</a></small></p>'
         return self.page('ohno 教师端', content)
@@ -265,7 +300,18 @@ class Handler(BaseHTTPRequestHandler):
                 dev = self.store.data['devices'].get(one('id'))
                 if not dev or one('approved') not in ('0', '1'):
                     return self.reply(400, 'Unknown device')
-                dev['approved'] = one('approved') == '1'
+                if one('approved') == '1':
+                    primary = dev.get('primary_mac', '')
+                    if not valid_mac(primary) or primary not in dev.get('macs', []):
+                        return self.reply(400, 'No valid hardware MAC to bind')
+                    # A MAC conflict must be investigated, not silently auto-approved.
+                    for other_id, other in self.store.data['devices'].items():
+                        if other_id != one('id') and other.get('approved') and other.get('bound_mac') in dev.get('macs', []):
+                            return self.reply(409, 'MAC already bound to another approved device')
+                    dev['bound_mac'] = primary
+                    dev['approved'] = True
+                else:
+                    dev['approved'] = False
             elif self.path == '/request':
                 item = next((x for x in self.store.data['requests'] if x['id'] == one('id')), None)
                 if not item or item['state'] != 'pending' or one('action') not in ('approve', 'deny'):
@@ -280,21 +326,33 @@ class Handler(BaseHTTPRequestHandler):
     def register(self, data):
         dev_id, key, name = data.get('id'), data.get('key'), data.get('name')
         tun, wfp = data.get('tun'), data.get('wfp')
-        if (tun is not None and not isinstance(tun, bool)) or (wfp is not None and not isinstance(wfp, bool)): return self.json_reply(400, {'error': 'invalid status'})
+        macs, primary = data.get('macs', []), data.get('primary_mac', '')
+        if (tun is not None and not isinstance(tun, bool)) or (wfp is not None and not isinstance(wfp, bool)):
+            return self.json_reply(400, {'error': 'invalid status'})
         if not all(isinstance(x, str) for x in (dev_id, key, name)) or not ID.fullmatch(dev_id) or not ID.fullmatch(key) or not 1 <= len(name) <= 128:
             return self.json_reply(400, {'error': 'invalid device registration'})
+        if (not isinstance(macs, list) or len(macs) > 16 or
+                any(not valid_mac(x) for x in macs) or len(set(macs)) != len(macs) or
+                not isinstance(primary, str) or primary != (macs[0] if macs else '')):
+            return self.json_reply(400, {'error': 'invalid MAC inventory'})
         with self.store.lock:
             dev = self.store.data['devices'].get(dev_id)
             digest = hashlib.sha256(key.encode()).hexdigest()
+            now = int(time.time())
             if dev:
                 if not hmac.compare_digest(dev['key_hash'], digest):
                     return self.json_reply(403, {'error': 'device id already used'})
-                dev['last_seen'] = int(time.time()); dev['tun'] = tun; dev['wfp'] = wfp
+                dev.update(name=name, macs=macs, primary_mac=primary,
+                           last_ip=self.client_address[0], last_seen=now, tun=tun, wfp=wfp)
                 self.store.save()
-                return self.json_reply(200, {'approved': dev['approved']})
+                return self.json_reply(200, {'approved': bool(self.store.device(dev_id, key))})
             if len(self.store.data['devices']) >= 1000:
                 return self.json_reply(429, {'error': 'device capacity'})
-            self.store.data['devices'][dev_id] = {'name': name, 'key_hash': digest, 'approved': False, 'last_seen': int(time.time()), 'tun': tun, 'wfp': wfp}
+            self.store.data['devices'][dev_id] = {
+                'name': name, 'key_hash': digest, 'approved': False, 'bound_mac': '',
+                'macs': macs, 'primary_mac': primary, 'last_ip': self.client_address[0],
+                'last_seen': now, 'tun': tun, 'wfp': wfp
+            }
             self.store.save()
         return self.json_reply(201, {'approved': False})
 
