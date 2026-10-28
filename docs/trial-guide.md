@@ -12,7 +12,7 @@ ohno-teacher.exe --state state.json --init
 ohno-teacher.exe --state state.json --cert teacher-cert.pem --key teacher-key.pem --bind 0.0.0.0 --port 8443
 ```
 
-初始化需设置至少 12 字符的教师密码。服务器地址应固定；`--host` 必须与客户端访问的 IP 或域名一致。`teacher-key.pem` 和 `state.json` 要通过 Windows 文件 ACL 限制为服务器管理员和服务账户可读写；`teacher-cert.pem` 是公钥，可分发给客户端。保护密码和私钥，定期备份状态。启动命令目前需要人工运行或由学校 IT 通过自己的服务管理工具配置自启动。
+初始化需设置至少 12 字符的教师密码。教师端服务器若也使用 DHCP，应为其配置稳定的内网 DNS 名称（或 DHCP 地址保留），例如 `ohno-teacher.school.lan`；安装终端时用 HTTPS 域名而非猜测当前 IP。`--host` 必须与客户端访问的 IP 或域名一致。MAC 只用于识别终端，不负责发现服务器。`teacher-key.pem` 和 `state.json` 要通过 Windows 文件 ACL 限制为服务器管理员和服务账户可读写；`teacher-cert.pem` 是公钥，可分发给客户端。保护密码和私钥，定期备份状态。启动命令目前需要人工运行或由学校 IT 通过自己的服务管理工具配置自启动。
 
 ## 学生端安装
 
