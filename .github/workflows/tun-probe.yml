@@ -78,3 +78,21 @@ jobs:
           Start-Sleep -Seconds 3
           Invoke-WebRequest -Uri https://example.com -UseBasicParsing -TimeoutSec 20 | Out-Null
           Write-Host 'Blocked domain recovered after TUN shutdown'
+          $cfg.route.rules = @(@{action='sniff'},@{domain=@('example.com');action='route';outbound='direct'},@{domain_suffix=@('example.com');action='reject'})
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'tun-probe.json'), ($cfg | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+          & $exe check -c tun-probe.json
+          if ($LASTEXITCODE -ne 0) { throw 'allow exception config rejected' }
+          $p = $null
+          try {
+            $p = Start-Process -FilePath $exe -ArgumentList @('run','-c',(Join-Path (Get-Location) 'tun-probe.json')) -PassThru -NoNewWindow -RedirectStandardOutput tun-allow-out.txt -RedirectStandardError tun-allow-err.txt
+            $ready = $false
+            for ($i=0; $i -lt 30; $i++) { Start-Sleep -Seconds 1; if ($p.HasExited) { throw 'allow-exception TUN exited' }; if (Get-NetAdapter -Name ohno-probe -ErrorAction SilentlyContinue) { $ready=$true; break } }
+            if (-not $ready) { throw 'allow-exception TUN not ready' }
+            Invoke-WebRequest -Uri https://example.com -UseBasicParsing -TimeoutSec 20 | Out-Null
+            Write-Host 'Exact-domain exception restored TUN access'
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
+            if (Test-Path tun-allow-err.txt) { Get-Content tun-allow-err.txt }
+          }
+          Start-Sleep -Seconds 3
+          Invoke-WebRequest -Uri https://api.github.com -UseBasicParsing -TimeoutSec 20 | Out-Null
