@@ -140,7 +140,7 @@ jobs:
             dist/ohno-teacher.exe
             dist/licenses
   publish-prerelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v0.1.0-alpha.1]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v0.1.0-alpha.2]')
     needs: [linux, windows-build]
     runs-on: ubuntu-latest
     permissions:
@@ -167,4 +167,4 @@ jobs:
           cp windows/wintun-LICENSE.txt release/client/wintun-LICENSE.txt
           (cd release/client && zip -q ../ohno-client-windows-x64.zip ohno-setup.exe trial-guide.md AGPL-3.0.txt sing-box-LICENSE.txt wintun-LICENSE.txt)
           (cd release/teacher && zip -qr ../ohno-teacher-windows-x64.zip ohno-teacher.exe licenses trial-guide.md AGPL-3.0.txt)
-          gh release create v0.1.0-alpha.1 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.1" --notes-file docs/release-notes.md release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip
+          gh release create v0.1.0-alpha.2 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.2" --notes-file docs/release-notes.md release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip
