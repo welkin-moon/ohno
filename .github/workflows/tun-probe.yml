@@ -1,0 +1,53 @@
+name: Isolated TUN forwarding probe
+on:
+  push:
+    branches: [work/tun-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tun:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - name: Download pinned sing-box
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip -OutFile sing-box.zip
+          $hash = (Get-FileHash sing-box.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df') { throw 'sing-box archive SHA-256 mismatch' }
+          Expand-Archive sing-box.zip -DestinationPath upstream
+      - name: Verify TUN startup, connectivity, and teardown
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem upstream -Recurse -Filter sing-box.exe | Select-Object -First 1).FullName
+          $config = @{
+            log = @{ level = 'info' }
+            inbounds = @(@{ type='tun'; tag='tun-in'; interface_name='ohno-probe'; address=@('198.18.0.1/30','fdfe:dcba:9876::1/126'); mtu=1500; auto_route=$true; strict_route=$false; dns_mode='disabled'; stack='system'; route_exclude_address=@('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','fc00::/7') })
+            outbounds = @(@{ type='direct'; tag='direct' })
+            route = @{ auto_detect_interface=$true; final='direct' }
+          } | ConvertTo-Json -Depth 10
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'tun-probe.json'), $config, [Text.UTF8Encoding]::new($false))
+          & $exe check -c tun-probe.json
+          if ($LASTEXITCODE -ne 0) { throw 'sing-box configuration rejected' }
+          Invoke-WebRequest -Uri https://api.github.com -UseBasicParsing -TimeoutSec 20 | Out-Null
+          $p = $null
+          try {
+            $p = Start-Process -FilePath $exe -ArgumentList @('run','-c',(Join-Path (Get-Location) 'tun-probe.json')) -PassThru -NoNewWindow -RedirectStandardOutput tun-out.txt -RedirectStandardError tun-err.txt
+            $ready = $false
+            for ($i=0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 1
+              if ($p.HasExited) { throw "sing-box exited with code $($p.ExitCode)" }
+              if (Get-NetAdapter -Name ohno-probe -ErrorAction SilentlyContinue) { $ready=$true; break }
+            }
+            if (-not $ready) { throw 'TUN adapter did not appear' }
+            Invoke-WebRequest -Uri https://api.github.com -UseBasicParsing -TimeoutSec 25 | Out-Null
+            Write-Host 'TUN appeared and external HTTPS remained reachable'
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
+            if (Test-Path tun-out.txt) { Get-Content tun-out.txt }
+            if (Test-Path tun-err.txt) { Get-Content tun-err.txt }
+          }
+          Start-Sleep -Seconds 3
+          Invoke-WebRequest -Uri https://api.github.com -UseBasicParsing -TimeoutSec 20 | Out-Null
+          Write-Host 'Connectivity returned after shutdown'
