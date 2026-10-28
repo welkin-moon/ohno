@@ -66,3 +66,30 @@ std::vector<std::string> stop_matching_processes(const std::vector<std::string>&
     }while(Process32NextW(snapshot.h,&entry));
     return stopped;
 }
+namespace {
+bool has_download_zone(const std::wstring& path){
+    auto stream=path+L":Zone.Identifier";
+    handle f{CreateFileW(stream.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)};
+    if(f.h==INVALID_HANDLE_VALUE)return false;
+    char buffer[8193]{};DWORD n=0;if(!ReadFile(f.h,buffer,8192,&n,nullptr))return false;
+    std::string text(buffer,n);std::size_t pos=0;
+    while(pos<text.size()){
+        auto end=text.find_first_of("\r\n",pos);if(end==std::string::npos)end=text.size();
+        auto line=text.substr(pos,end-pos);if(line=="ZoneId=3"||line=="ZoneId=4")return true;
+        pos=end;while(pos<text.size()&&(text[pos]=='\r'||text[pos]=='\n'))++pos;
+    }
+    return false;
+}
+bool is_removable(const std::wstring& path){wchar_t volume[MAX_PATH]{};return GetVolumePathNameW(path.c_str(),volume,MAX_PATH)&&GetDriveTypeW(volume)==DRIVE_REMOVABLE;}
+}
+std::vector<UntrustedProgram> observe_untrusted_programs(){
+    std::vector<UntrustedProgram> out;handle snapshot{CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};
+    if(snapshot.h==INVALID_HANDLE_VALUE)return out;PROCESSENTRY32W e{};e.dwSize=sizeof(e);if(!Process32FirstW(snapshot.h,&e))return out;
+    do{
+        if(e.th32ProcessID==0||e.th32ProcessID==4||e.th32ProcessID==GetCurrentProcessId())continue;
+        handle proc{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,e.th32ProcessID)};if(!proc.h)continue;
+        std::vector<wchar_t> buffer(32768);DWORD n=static_cast<DWORD>(buffer.size());if(!QueryFullProcessImageNameW(proc.h,0,buffer.data(),&n))continue;
+        std::wstring path(buffer.data(),n);if(!is_removable(path)&&!has_download_zone(path))continue;
+        auto hash=file_hash(path);if(!hash.empty())out.push_back({path,hash});
+    }while(Process32NextW(snapshot.h,&e));return out;
+}

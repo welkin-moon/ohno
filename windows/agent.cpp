@@ -9,6 +9,7 @@
 #include "agent.hpp"
 #include "monitor.hpp"
 #include "browser_policy.hpp"
+#include "network_filter.hpp"
 #include <algorithm>
 #include <ctime>
 #include <map>
@@ -111,6 +112,8 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
 }
 }
 void run_agent(HANDLE stop_event){
+    NetworkFilter network;
+    if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
     std::set<std::string> queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
@@ -140,22 +143,30 @@ void run_agent(HANDLE stop_event){
                 std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 std::vector<std::string> names;for(const auto& item:name_rules.items)if(item.type==ohno_json::value::kind::string)names.push_back(item.text);
-                std::vector<std::string> allowed;
+                std::vector<std::string> allowed,network_allowed;
                 std::vector<std::string> blocked;for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
                 if(online)for(const auto& grant:grants.items){
                     const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
-                    if(kind.type==ohno_json::value::kind::string&&kind.text=="application"&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
-                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr)))allowed.push_back(object.text);}catch(const std::exception&){}
+                    if(kind.type==ohno_json::value::kind::string&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
+                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr))){if(kind.text=="application")allowed.push_back(object.text);else if(kind.text=="network")network_allowed.push_back(object.text);}}catch(const std::exception&){}
                     }
                 }
                 for(const auto& hash:stop_matching_processes(blocked,names,allowed)){
                     auto now=GetTickCount64();auto it=last_request.find(hash);
-                    if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert(hash);}
+                    if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert("A:"+hash);}
+                }
+                network.apply_grants(network_allowed);
+                for(const auto& app:observe_untrusted_programs()){
+                    if(std::find(network_allowed.begin(),network_allowed.end(),app.hash)!=network_allowed.end())continue;
+                    if(network.register_untrusted(app.path,app.hash)){
+                        auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);
+                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;queued.insert(name);}
+                    }
                 }
             }
             if(online){
                 for(auto it=queued.begin();it!=queued.end();){
-                    try{auto body="{\"kind\":\"application\",\"object\":"+quoted(*it)+"}";
+                    try{auto kind=it->substr(0,2)=="N:"?"network":"application";auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(it->substr(2))+"}";
                         auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
                         if(response.status==201)it=queued.erase(it);else break;
                     }catch(const std::exception&){break;}
