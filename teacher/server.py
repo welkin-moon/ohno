@@ -215,8 +215,30 @@ class Handler(BaseHTTPRequestHandler):
         hidden = '<input type="hidden" name="csrf" value="' + esc(csrf) + '">'
         rows = []
         for dev_id, dev in devices:
-            action = '<form method="post" action="/device">' + hidden + '<input type="hidden" name="id" value="' + esc(dev_id) + '"><button name="approved" value="' + ('0' if dev['approved'] else '1') + '">' + ('停用' if dev['approved'] else '批准设备') + '</button></form>'
-            rows.append('<tr><td>' + esc(dev['name']) + '</td><td>' + esc(dev_id[:12]) + '</td><td>' + ('已批准' if dev['approved'] else '待批准') + ' / ' + ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') + ' / TUN 进程: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') + ' / WFP 引擎: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') + '</td><td>' + action + '</td></tr>')
+            active = dev['approved'] and mac_bound(dev)
+            macs = dev.get('macs', [])
+            bound = dev.get('bound_mac', '')
+            collision = any(other_id != dev_id and other.get('approved') and
+                            other.get('bound_mac') in macs for other_id, other in devices)
+            if active: status = '已批准'
+            elif dev['approved']: status = 'MAC 变更，需核验并重新绑定'
+            else: status = '待批准'
+            if collision: status += ' / MAC 冲突'
+            commands = ''
+            if dev.get('primary_mac') and not active:
+                commands += '<button name="approved" value="1">' + ('重新绑定' if dev['approved'] else '批准并绑定 MAC') + '</button> '
+            if dev['approved']: commands += '<button name="approved" value="0">停用</button>'
+            if not dev.get('primary_mac'): commands += '<small>没有可绑定的 MAC，检查网卡</small>'
+            action = '<form method="post" action="/device">' + hidden + '<input type="hidden" name="id" value="' + esc(dev_id) + '">' + commands + '</form>'
+            mac_text = '<strong>' + esc(bound or '未绑定') + '</strong><small> 当前: ' + esc(dev.get('primary_mac') or '未知') + '</small>'
+            if len(macs) > 1: mac_text += '<small> 其他: ' + esc(', '.join(macs[1:])) + '</small>'
+            rows.append('<tr><td>' + esc(dev['name']) + '</td><td>' + esc(dev_id[:12]) +
+                        '</td><td>' + mac_text + '</td><td>' + esc(dev.get('last_ip') or '未知') +
+                        '</td><td>' + status + ' / ' +
+                        ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') +
+                        ' / TUN 进程: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') +
+                        ' / WFP 引擎: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') +
+                        '</td><td>' + action + '</td></tr>')
         req_rows = []
         for item in requests:
             action = ''
@@ -225,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
         content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件（可能影响本地课件及 PDF，覆盖不保证）</label></p><button>保存规则</button></form></section>'
-        content += '<section><h2>设备</h2><table><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
+        content += '<section><h2>设备</h2><p><small>MAC 在教师审批时绑定；IP 仅作当前连接参考，变动不影响身份。MAC 可伪造，实际认证仍要求设备密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>已绑定 / 发现 MAC</th><th>最近连接 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         content += '<p><small>ohno 是自由软件：<a href="https://github.com/welkin-moon/ohno">查看源码与许可证</a></small></p>'
         return self.page('ohno 教师端', content)
