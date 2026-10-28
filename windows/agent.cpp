@@ -132,7 +132,7 @@ void run_agent(HANDLE stop_event){
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
-    std::set<std::string> queued;
+    std::map<std::string,std::wstring> queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
@@ -172,22 +172,22 @@ void run_agent(HANDLE stop_event){
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
                 network.set_paused(paused);
-                if(!paused)for(const auto& hash:stop_matching_processes(blocked,names,allowed)){
-                    auto now=GetTickCount64();auto it=last_request.find(hash);
-                    if(it==last_request.end()||now-it->second>=60000){last_request[hash]=now;queued.insert("A:"+hash);}
+                if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed)){
+                    auto now=GetTickCount64();auto it=last_request.find(app.hash);
+                    if(it==last_request.end()||now-it->second>=60000){last_request[app.hash]=now;queued.emplace("A:"+app.hash,app.name);}
                 }
                 network.apply_grants(network_allowed);
                 if(!paused)for(const auto& app:observe_untrusted_programs()){
                     if(std::find(network_allowed.begin(),network_allowed.end(),app.hash)!=network_allowed.end())continue;
                     if(network.register_untrusted(app.path,app.hash)){
                         auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);
-                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;queued.insert(name);notify_network_block(app.pid);}
+                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;auto split=app.path.find_last_of(L"\\/");queued.emplace(name,split==std::wstring::npos?app.path:app.path.substr(split+1));notify_network_block(app.pid);}
                     }
                 }
             }
             if(online){
                 for(auto it=queued.begin();it!=queued.end();){
-                    try{auto prefix=it->substr(0,2);auto kind=prefix=="N:"?"network":prefix=="W:"?"website":"application";auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(it->substr(2))+"}";
+                    try{auto prefix=it->first.substr(0,2);auto kind=prefix=="N:"?"network":"application";auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(it->first.substr(2))+",\"label\":"+quoted(utf8(it->second))+"}";
                         auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
                         if(response.status==201)it=queued.erase(it);else break;
                     }catch(const std::exception&){break;}

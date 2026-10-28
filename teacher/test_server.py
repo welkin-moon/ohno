@@ -54,7 +54,8 @@ class TeacherIntegration(unittest.TestCase):
         status, _, page=self.req('GET','/',headers={'Cookie':cookie});self.assertIn('&lt;school-pc&gt;',page)
         status, _, _=self.req('POST','/device',urlencode({'csrf':csrf,'id':dev,'approved':'1'}),{'Cookie':cookie});self.assertEqual(status,303)
         status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['web_domains'],['games.example']);self.assertEqual(json.loads(body)['program_names'],['gta3.exe']);self.assertTrue(json.loads(body)['block_local_files'])
-        status, _, body=self.req('POST','/api/device/request',json.dumps({'kind':'website','object':'games.example'}),auth);self.assertEqual(status,201);request_id=json.loads(body)['id']
+        status, _, body=self.req('POST','/api/device/request',json.dumps({'kind':'website','object':'games.example','label':'<Game>.exe'}),auth);self.assertEqual(status,201);request_id=json.loads(body)['id']
+        self.assertIn('&lt;Game&gt;.exe',self.req('GET','/',headers={'Cookie':cookie})[2])
         status, _, _=self.req('POST','/request',urlencode({'csrf':csrf,'id':request_id,'action':'approve'}),{'Cookie':cookie});self.assertEqual(status,303)
         status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['grants'][0]['object'],'games.example')
         self.assertEqual(self.req('POST','/api/device/unlock',json.dumps({'password':'wrong'}),auth)[0],403)

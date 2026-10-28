@@ -209,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
             action = ''
             if item['state'] == 'pending':
                 action = '<form method="post" action="/request">' + hidden + '<input type="hidden" name="id" value="' + esc(item['id']) + '"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>'
-            req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item['object']) + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
+            req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
         content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件（可能影响本地课件及 PDF，覆盖不保证）</label></p><button>保存规则</button></form></section>'
         content += '<section><h2>设备</h2><table><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
@@ -316,6 +316,9 @@ class Handler(BaseHTTPRequestHandler):
     def submit_request(self, data):
         dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
         kind, obj = data.get('kind'), data.get('object')
+        label = data.get('label', '')
+        if not isinstance(label, str) or len(label) > 128 or '/' in label or '\\' in label or any(ord(c) < 32 for c in label):
+            return self.json_reply(400, {'error': 'invalid program label'})
         if not isinstance(kind, str) or kind not in ('website', 'application', 'network', 'local_html') or not isinstance(obj, str) or not 1 <= len(obj) <= 512:
             return self.json_reply(400, {'error': 'invalid request'})
         if (kind == 'website' and not HOSTNAME.fullmatch(obj)) or (kind in ('application','network') and not HASH.fullmatch(obj)):
@@ -326,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
             requests = self.store.data['requests']
             if len(requests) >= 10000:
                 return self.json_reply(429, {'error': 'request capacity'})
-            item = {'id': secrets.token_urlsafe(18), 'device_id': dev_id, 'kind': kind, 'object': obj, 'state': 'pending', 'created': int(time.time())}
+            item = {'id': secrets.token_urlsafe(18), 'device_id': dev_id, 'kind': kind, 'object': obj, 'label': label, 'state': 'pending', 'created': int(time.time())}
             requests.append(item)
             self.store.save()
         return self.json_reply(201, {'id': item['id']})

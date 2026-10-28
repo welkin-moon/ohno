@@ -44,8 +44,8 @@ void show_notice(DWORD pid){
     DWORD result=0;WTSSendMessageW(WTS_CURRENT_SERVER_HANDLE,session,title,static_cast<DWORD>(wcslen(title)*sizeof(wchar_t)),message,static_cast<DWORD>(wcslen(message)*sizeof(wchar_t)),MB_OK|MB_ICONINFORMATION,15,&result,FALSE);
 }
 }
-std::vector<std::string> stop_matching_processes(const std::vector<std::string>& blocked,const std::vector<std::string>& names,const std::vector<std::string>& allowed,DWORD only_pid){
-    std::vector<std::string> stopped;if(blocked.empty()&&names.empty())return stopped;
+std::vector<BlockedProgram> stop_matching_processes(const std::vector<std::string>& blocked,const std::vector<std::string>& names,const std::vector<std::string>& allowed,DWORD only_pid){
+    std::vector<BlockedProgram> stopped;if(blocked.empty()&&names.empty())return stopped;
     handle snapshot{CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};if(snapshot.h==INVALID_HANDLE_VALUE)return stopped;
     PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);
     if(!Process32FirstW(snapshot.h,&entry))return stopped;
@@ -62,7 +62,7 @@ std::vector<std::string> stop_matching_processes(const std::vector<std::string>&
         if(n>0&&n<MAX_PATH&&image.size()>n&&_wcsnicmp(image.c_str(),root,n)==0&&(image[n]==L'\\'||image[n]==L'/'))continue;
         auto hash=file_hash(image);if(hash.empty()||std::find(allowed.begin(),allowed.end(),hash)!=allowed.end())continue;
         if(!named&&std::find(blocked.begin(),blocked.end(),hash)==blocked.end())continue;
-        if(TerminateProcess(proc.h,ERROR_ACCESS_DISABLED_BY_POLICY)){stopped.push_back(hash);show_notice(pid);}
+        if(TerminateProcess(proc.h,ERROR_ACCESS_DISABLED_BY_POLICY)){stopped.push_back({hash,entry.szExeFile});show_notice(pid);}
     }while(Process32NextW(snapshot.h,&entry));
     return stopped;
 }
