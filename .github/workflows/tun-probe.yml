@@ -21,6 +21,8 @@ jobs:
         shell: pwsh
         run: |
           $exe = (Get-ChildItem upstream -Recurse -Filter sing-box.exe | Select-Object -First 1).FullName
+          $cronet = Join-Path (Split-Path $exe) 'libcronet.dll'
+          if (Test-Path $cronet) { Move-Item $cronet ($cronet + '.unused') }
           $config = @{
             log = @{ level = 'info' }
             inbounds = @(@{ type='tun'; tag='tun-in'; interface_name='ohno-probe'; address=@('198.18.0.1/30','fdfe:dcba:9876::1/126'); mtu=1500; auto_route=$true; strict_route=$false; dns_mode='disabled'; stack='system'; route_exclude_address=@('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','fc00::/7') })
