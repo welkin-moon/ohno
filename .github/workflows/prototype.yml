@@ -27,6 +27,10 @@ jobs:
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib
           if errorlevel 1 exit /b 1
+          rc /fo setup.res windows\setup.rc
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib /link /MANIFEST:NO
+          if errorlevel 1 exit /b 1
           cl /std:c++17 /EHsc /W4 /MT /Isrc tests\policy_test.cpp src\policy.cpp /Fe:policy-test.exe
           if errorlevel 1 exit /b 1
           policy-test.exe
@@ -38,11 +42,25 @@ jobs:
           for /f %%h in ('powershell -NoProfile -Command "(Get-FileHash test-target.exe -Algorithm SHA256).Hash.ToLower()"') do set "HASH=%%h"
           monitor-test.exe %HASH%
           if errorlevel 1 exit /b 1
+      - name: Install and remove service in ephemeral runner
+        shell: pwsh
+        run: |
+          $p = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Runner is not elevated' }
+          try {
+            & .\ohno-setup.exe --install https://localhost:8443
+            if ($LASTEXITCODE -ne 0) { throw 'Installer failed' }
+            & sc.exe query OhnoPrototype
+            if ($LASTEXITCODE -ne 0) { throw 'Service missing' }
+          } finally {
+            & .\ohno-setup.exe --remove
+            if ($LASTEXITCODE -ne 0) { throw 'Uninstall failed' }
+          }
       - name: Upload client prototype
         uses: actions/upload-artifact@v4
         with:
           name: ohno-client-prototype-windows-x64
-          path: ohno-service-prototype.exe
+          path: |\n            ohno-service-prototype.exe\n            ohno-setup.exe
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

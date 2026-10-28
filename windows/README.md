@@ -21,3 +21,7 @@ cl /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE service.cpp /Fe:ohno-service-pr
 服务从注册表 `HKLM\SOFTWARE\Ohno` 的字符串值 `ServerUrl` 读取教师端 HTTPS 根地址，使用系统证书信任链；设备凭据在本机系统注册表生成，教师批准后开始轮询。原型会在硬件 SMBIOS UUID 改变时重建设备凭据并请求审批；UUID 不存在时拒绝注册。尚未验证兆芯机器的 UUID 是否存在且唯一，因此仍不能用于实际镜像分发。
 
 进程检测存在启动后至扫描前的时间窗口，拒绝执行可能失败，不能作为恶意程序防护。网站、来源联网、本地 HTML 的拦截及安装均未实现。
+
+## 安装器试验代码
+
+`setup.cpp` 和 `setup.rc` 可将服务嵌入一个原生安装程序。实验参数：`ohno-setup.exe --install https://teacher.example:8443`；移除：`ohno-setup.exe --remove`。程序要求管理员权限、创建自动启动服务并设置有限的 SCM 崩溃重启。它依赖系统已信任的教师服务器 HTTPS 证书。当前只适用于构建与隔离测试，尚未验证完整卸载、镜像分发和学校实际环境。

@@ -1,0 +1,3 @@
+#include <windows.h>
+101 RCDATA "ohno-service-prototype.exe"
+1 RT_MANIFEST "windows\\setup.manifest"
