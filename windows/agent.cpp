@@ -132,6 +132,10 @@ void run_agent(HANDLE stop_event){
     RequestPipe website_requests(stop_event,on_request);
     TunManager tun(stop_event);
     std::vector<std::string> tun_blocked,tun_allowed;
+    try{
+        get_identity();auto cached=cached_policy();
+        if(!cached.empty()){auto p=ohno_json::parse(cached);validate_policy(p);for(const auto& d:p.at("web_domains").items)if(d.type==ohno_json::value::kind::string)tun_blocked.push_back(d.text);}
+    }catch(const std::exception&){debug(L"ohno: cached TUN policy unavailable\n");}
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
