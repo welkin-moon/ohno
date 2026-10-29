@@ -9,7 +9,10 @@ import json
 import os
 import re
 import secrets
+import socket
+import sys
 import ssl
+import webbrowser
 import tempfile
 import threading
 import time
@@ -17,6 +20,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
+from school_installer import build_school_installer
 
 MAX_BODY = 65536
 ITERATIONS = 310000
@@ -190,6 +194,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             return self.json_reply(200, {'ok': True})
+        if self.path == '/school-installer':
+            if not self.store.session(self.cookie()):
+                return self.reply(403, 'Teacher login required')
+            setup_exe = getattr(self.server, 'school_installer_exe', None)
+            origin = getattr(self.server, 'enrollment_origin', None)
+            cert_pem = getattr(self.server, 'public_certificate', None)
+            if not setup_exe or not origin or not cert_pem:
+                return self.reply(503, 'School installer is not available')
+            try:
+                packaged = build_school_installer(Path(setup_exe).read_bytes(), origin, cert_pem)
+            except (OSError, ValueError):
+                return self.reply(503, 'Cannot prepare school installer')
+            return self.reply(200, packaged, 'application/octet-stream',
+                              [('Content-Disposition', 'attachment; filename="Ohno-School-Setup.exe"')])
         if self.path == '/api/device/policy':
             dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
             with self.store.lock:
@@ -247,6 +265,8 @@ class Handler(BaseHTTPRequestHandler):
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
         content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件（可能影响本地课件及 PDF，覆盖不保证）</label></p><button>保存规则</button></form></section>'
+        if getattr(self.server, 'school_installer_exe', None) and getattr(self.server, 'enrollment_origin', None):
+            content += '<section><h2>学生机一键安装</h2><p>下载此学校专属 EXE，在模板机双击并允许一次 UAC 即可安装；无需命令行。证书与服务器地址已写入安装包，不含教师密码或私钥。</p><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a></p><p><small>发布前应由学校 IT 核验教师服务器名称，先在一台可恢复的测试机试装。证书会进入这台机器的受信任根证书存储。</small></p></section>'
         content += '<section><h2>设备</h2><p><small>MAC 在教师审批时绑定；IP 仅作当前连接参考，变动不影响身份。MAC 可伪造，实际认证仍要求设备密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>已绑定 / 发现 MAC</th><th>最近连接 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         content += '<p><small>ohno 是自由软件：<a href="https://github.com/welkin-moon/ohno">查看源码与许可证</a></small></p>'
@@ -417,7 +437,7 @@ def create_certificate(cert_path, key_path, host):
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(private.public_key())
             .serial_number(x509.random_serial_number()).not_valid_before(now-timedelta(minutes=5))
-            .not_valid_after(now+timedelta(days=825)).add_extension(x509.SubjectAlternativeName([alt]),critical=False)
+            .not_valid_after(now+timedelta(days=825)).add_extension(x509.SubjectAlternativeName([alt, x509.DNSName('localhost'), x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),critical=False)
             .add_extension(x509.BasicConstraints(ca=True,path_length=0),critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),critical=False)
             .sign(private,hashes.SHA256()))
@@ -433,7 +453,74 @@ def create_certificate(cert_path, key_path, host):
         raise
 
 
+def locate_base_installer():
+    """Locate the client binary embedded by PyInstaller, or beside teacher.exe."""
+    roots = []
+    if getattr(sys, '_MEIPASS', None): roots.append(Path(sys._MEIPASS))
+    roots.append(Path(sys.executable).resolve().parent)
+    roots.append(Path.cwd())
+    for root in roots:
+        candidate = root / 'ohno-setup.exe'
+        if candidate.is_file(): return candidate
+    return None
+
+
+def serve_teacher(state, cert, key, bind, port, enrollment_host=None, open_browser=False):
+    store = Store(state)
+    server = ThreadingHTTPServer((bind, port), Handler)
+    server.store = store
+    server.school_installer_exe = locate_base_installer()
+    if enrollment_host and server.school_installer_exe:
+        server.enrollment_origin = 'https://' + enrollment_host + ':' + str(port)
+        server.public_certificate = Path(cert).read_bytes()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cert, key)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    print('ohno HTTPS server listening on %s:%d' % server.server_address)
+    if open_browser:
+        webbrowser.open('https://localhost:' + str(port) + '/', new=2)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def easy_start():
+    """First-run teacher setup: double-click, remember one random password, manage in browser."""
+    home = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'OhnoTeacher'
+    home.mkdir(parents=True, exist_ok=True)
+    state, cert, key = home/'state.json', home/'teacher-cert.pem', home/'teacher-key.pem'
+    hostname = socket.gethostname().split('.')[0].lower()
+    if not HOSTNAME.fullmatch(hostname):
+        raise ValueError('Computer hostname is not suitable for teacher HTTPS certificate')
+    if not cert.exists() and not key.exists():
+        create_certificate(cert, key, hostname)
+    elif not (cert.exists() and key.exists()):
+        raise RuntimeError('Incomplete teacher certificate files. Restore the matching cert/key pair.')
+    password = None
+    if not state.exists():
+        password = secrets.token_urlsafe(20)
+        Store.initialize(state, password)
+    if password:
+        # Secret is shown once. Never save it as plaintext or log it.
+        if os.name == 'nt':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None,
+                'Ohno 教师端已初始化。\n\n教师管理密码（只显示这一次）：\n' + password +
+                '\n\n请记录密码并妥善保存。浏览器随后会打开管理页面。',
+                'Ohno 初次设置', 0x40)
+        else:
+            print('Ohno teacher password (shown once):', password)
+    serve_teacher(str(state),str(cert),str(key),'0.0.0.0',8443,hostname,open_browser=True)
+
+
 def main():
+    if len(sys.argv) == 1:
+        easy_start()
+        return
     p = argparse.ArgumentParser(description='ohno teacher HTTPS service')
     p.add_argument('--state', help='Path to private writable state file')
     p.add_argument('--init', action='store_true', help='Create state and teacher password interactively')
@@ -459,20 +546,7 @@ def main():
         print('State initialized.')
         return
     if not args.cert or not args.key: p.error('HTTPS certificate and private key are required')
-    store = Store(args.state)
-    server = ThreadingHTTPServer((args.bind, args.port), Handler)
-    server.store = store
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(args.cert, args.key)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
-    print('ohno HTTPS server listening on %s:%d' % server.server_address)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    serve_teacher(args.state,args.cert,args.key,args.bind,args.port,args.host)
 
 if __name__ == '__main__':
     main()
