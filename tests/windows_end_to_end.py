@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 root=Path.cwd()
 sys.path.insert(0,str(root/'teacher'))
 from server import Store
+from school_installer import build_school_installer
 setup=root/'ohno-setup.exe'
 target=root/'test-target.exe'
 ctx=ssl._create_unverified_context()
@@ -57,7 +58,11 @@ def main():
         try:
             server=subprocess.Popen([sys.executable,str(root/'teacher/server.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
             waitfor(lambda:call('GET','/health')[0]==200,15)
-            subprocess.run([str(setup),'--install','https://localhost:8443','--certificate',str(cert)],check=True);installed=True;root_installed=True
+            # Exercise the same embedded school configuration used by a double-click,
+            # without a message box on the headless CI runner.
+            school_setup=Path(temp)/'Ohno-School-Setup.exe'
+            school_setup.write_bytes(build_school_installer(setup.read_bytes(),'https://localhost:8443',cert.read_bytes()))
+            subprocess.run([str(school_setup),'--install-bundled'],check=True);installed=True;root_installed=True
             def read():return json.loads(state.read_text('utf-8'))
             device=waitfor(lambda:next(iter(read()['devices']),None),90)
             waitfor(lambda:read()['devices'][device].get('tun') is True,90)
