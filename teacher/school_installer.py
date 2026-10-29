@@ -11,7 +11,7 @@ MAGIC = b'OHNOBT01'
 TRAILER = struct.Struct('<II8s')
 MAX_ORIGIN = 1024
 MAX_CERT = 16384
-MAX_INSTALLER = 64 * 1024 * 1024
+MAX_INSTALLER = 256 * 1024 * 1024
 
 
 def build_school_installer(setup_exe: bytes, server_url: str, certificate_pem: bytes) -> bytes:
