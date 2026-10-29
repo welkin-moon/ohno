@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 from server import Handler, Store, create_certificate
+from school_installer import get_school_configuration
 from http.server import ThreadingHTTPServer
 
 
@@ -22,6 +23,10 @@ class TeacherIntegration(unittest.TestCase):
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'key.pem'),'-out',str(root/'cert.pem'),'-days','1','-subj','/CN=localhost'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         cls.server = ThreadingHTTPServer(('127.0.0.1',0), Handler)
         cls.server.store = cls.store
+        cls.server.school_installer_exe = root/'ohno-setup.exe'
+        cls.server.school_installer_exe.write_bytes(b'MZ'+bytes(5000))
+        cls.server.enrollment_origin = 'https://teacher-pc:8443'
+        cls.server.public_certificate = (root/'cert.pem').read_bytes()
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(root/'cert.pem',root/'key.pem')
         cls.server.socket = context.wrap_socket(cls.server.socket,server_side=True)
@@ -112,6 +117,24 @@ class TeacherIntegration(unittest.TestCase):
         self.assertEqual(self.req('POST','/api/device/register',json.dumps(
             {'id':old_dev,'key':old_key,'name':'legacy'}))[0],201)
         self.assertEqual(form(old_dev,'1'),400)
+
+    def test_school_installer_download(self):
+        self.assertEqual(self.req('GET','/school-installer')[0],403)
+        status, headers, _=self.req('POST','/login',urlencode({'password':'a-strong-test-password'}))
+        self.assertEqual(status,303)
+        cookie=headers['Set-Cookie'].split(';')[0]
+        connection=http.client.HTTPSConnection('127.0.0.1',self.server.server_port,
+                                               context=ssl._create_unverified_context(),timeout=5)
+        connection.request('GET','/school-installer',headers={'Cookie':cookie})
+        response=connection.getresponse()
+        payload=response.read()
+        self.assertEqual(response.status,200)
+        self.assertIn('Ohno-School-Setup.exe',response.getheader('Content-Disposition'))
+        connection.close()
+        url, cert=get_school_configuration(payload)
+        self.assertEqual(url,'https://teacher-pc:8443')
+        self.assertEqual(cert,self.server.public_certificate)
+        self.assertEqual(payload[:2],b'MZ')
 
     def test_certificate_generation(self):
         with tempfile.TemporaryDirectory() as temp:

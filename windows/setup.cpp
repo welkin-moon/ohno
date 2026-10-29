@@ -8,7 +8,10 @@
 #include <cstdio>
 #include <cwchar>
 #include <string>
+#include <vector>
 #include "browser_policy.hpp"
+#include "setup_bundle.hpp"
+#include "setup_ui.hpp"
 #pragma comment(lib,"advapi32.lib")
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
@@ -20,13 +23,15 @@ struct sc {SC_HANDLE h=nullptr;~sc(){if(h)CloseServiceHandle(h);}};
 struct reg {HKEY h=nullptr;~reg(){if(h)RegCloseKey(h);}};
 std::wstring directory(){PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,0,nullptr,&raw)))return {};std::wstring p=raw;CoTaskMemFree(raw);return p+L"\\OhnoPrototype";}
 bool valid_url(const wchar_t* url){URL_COMPONENTSW c{};c.dwStructSize=sizeof(c);c.dwHostNameLength=DWORD(-1);c.dwUserNameLength=DWORD(-1);c.dwPasswordLength=DWORD(-1);c.dwUrlPathLength=DWORD(-1);c.dwExtraInfoLength=DWORD(-1);return WinHttpCrackUrl(url,0,0,&c)&&c.nScheme==INTERNET_SCHEME_HTTPS&&c.dwHostNameLength&&!c.dwUserNameLength&&!c.dwPasswordLength&&!c.dwExtraInfoLength&&c.dwUrlPathLength<=1;}
-bool import_root_certificate(const wchar_t* path,HKEY config){
-    DWORD encoding=0,content=0,format=0;PCCERT_CONTEXT certificate=nullptr;
-    if(!CryptQueryObject(CERT_QUERY_OBJECT_FILE,path,CERT_QUERY_CONTENT_FLAG_CERT,CERT_QUERY_FORMAT_FLAG_ALL,0,&encoding,&content,&format,nullptr,nullptr,reinterpret_cast<const void**>(&certificate))||!certificate)return false;
+// This changes machine-wide certificate trust. School administrators must
+// verify the teacher endpoint before distributing a personalized installer.
+bool import_root_context(PCCERT_CONTEXT certificate,HKEY config){
+    if(!certificate)return false;
     HCERTSTORE roots=CertOpenStore(CERT_STORE_PROV_SYSTEM_W,0,0,CERT_SYSTEM_STORE_LOCAL_MACHINE,L"ROOT");
-    if(!roots){CertFreeCertificateContext(certificate);return false;}
+    if(!roots)return false;
     bool result=false;BYTE hash[20]{};DWORD size=sizeof(hash);
-    if(CertCompareCertificateName(encoding,&certificate->pCertInfo->Subject,&certificate->pCertInfo->Issuer)&&CertGetCertificateContextProperty(certificate,CERT_SHA1_HASH_PROP_ID,hash,&size)&&size==sizeof(hash)){
+    if(CertCompareCertificateName(X509_ASN_ENCODING,&certificate->pCertInfo->Subject,&certificate->pCertInfo->Issuer)&&
+        CertGetCertificateContextProperty(certificate,CERT_SHA1_HASH_PROP_ID,hash,&size)&&size==sizeof(hash)){
         CRYPT_HASH_BLOB blob{size,hash};
         PCCERT_CONTEXT existing=CertFindCertificateInStore(roots,X509_ASN_ENCODING|PKCS_7_ASN_ENCODING,0,CERT_FIND_SHA1_HASH,&blob,nullptr);
         if(existing){CertFreeCertificateContext(existing);result=true;}
@@ -35,7 +40,27 @@ bool import_root_certificate(const wchar_t* path,HKEY config){
             else RegDeleteValueW(config,L"ImportedRootSha1");
         }
     }
-    CertCloseStore(roots,0);CertFreeCertificateContext(certificate);return result;
+    CertCloseStore(roots,0);
+    return result;
+}
+bool import_root_certificate(const wchar_t* path,HKEY config){
+    DWORD encoding=0,content=0,format=0;PCCERT_CONTEXT certificate=nullptr;
+    if(!CryptQueryObject(CERT_QUERY_OBJECT_FILE,path,CERT_QUERY_CONTENT_FLAG_CERT,CERT_QUERY_FORMAT_FLAG_ALL,0,
+        &encoding,&content,&format,nullptr,nullptr,reinterpret_cast<const void**>(&certificate))||!certificate)return false;
+    bool result=import_root_context(certificate,config);
+    CertFreeCertificateContext(certificate);return result;
+}
+bool import_root_pem(const std::string& pem,HKEY config){
+    DWORD der_length=0;
+    if(!CryptStringToBinaryA(pem.c_str(),static_cast<DWORD>(pem.size()),CRYPT_STRING_BASE64HEADER,
+        nullptr,&der_length,nullptr,nullptr)||!der_length||der_length>16384)return false;
+    std::vector<BYTE> der(der_length);
+    if(!CryptStringToBinaryA(pem.c_str(),static_cast<DWORD>(pem.size()),CRYPT_STRING_BASE64HEADER,
+        der.data(),&der_length,nullptr,nullptr))return false;
+    PCCERT_CONTEXT cert=CertCreateCertificateContext(X509_ASN_ENCODING|PKCS_7_ASN_ENCODING,der.data(),der_length);
+    if(!cert)return false;
+    bool ok=import_root_context(cert,config);
+    CertFreeCertificateContext(cert);return ok;
 }
 bool remove_imported_certificate(HKEY config){
     BYTE hash[20]{};DWORD size=sizeof(hash),type=0;
@@ -82,7 +107,7 @@ std::wstring read_config_string(HKEY key,const wchar_t* name){
     std::wstring value(size/sizeof(wchar_t),L'\0');if(RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(value.data()),&size)!=ERROR_SUCCESS)return {};
     while(!value.empty()&&value.back()==L'\0')value.pop_back();return value;
 }
-int install(const wchar_t* url,const wchar_t* certificate_path){
+int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr){
     if(!valid_url(url)){std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
     sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)};if(!manager.h){std::fwprintf(stderr,L"Administrator access required (%lu)\n",GetLastError());return 1;}
     sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){std::fwprintf(stderr,L"Service already exists.\n");return 1;}
@@ -97,7 +122,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path){
         if(RegSetValueExW(config.h,L"ServerUrl",0,REG_SZ,reinterpret_cast<const BYTE*>(url),static_cast<DWORD>((wcslen(url)+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot write configuration.\n");break;}
         if(!make_shortcut(helper,shortcut)){std::fwprintf(stderr,L"Cannot create request shortcut.\n");break;}
         if(!shortcut.empty()&&RegSetValueExW(config.h,L"Shortcut",0,REG_SZ,reinterpret_cast<const BYTE*>(shortcut.c_str()),static_cast<DWORD>((shortcut.size()+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot record request shortcut.\n");break;}
-        if(certificate_path&&!import_root_certificate(certificate_path,config.h)){std::fwprintf(stderr,L"Cannot import self-signed teacher certificate (%lu)\n",GetLastError());break;}
+        if((certificate_path&&!import_root_certificate(certificate_path,config.h))||(embedded_pem&&!import_root_pem(*embedded_pem,config.h))){std::fwprintf(stderr,L"Cannot import teacher certificate (%lu)\n",GetLastError());break;}
         std::wstring quoted=L"\""+exe+L"\"";
         sc svc{CreateServiceW(manager.h,service_name,L"ohno prototype",SERVICE_ALL_ACCESS,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,quoted.c_str(),nullptr,nullptr,nullptr,nullptr,nullptr)};
         if(!svc.h){std::fwprintf(stderr,L"Cannot register service (%lu)\n",GetLastError());break;}
@@ -134,8 +159,30 @@ int remove(){
 }
 }
 int wmain(int argc,wchar_t** argv){
+    if(argc==1 || (argc==2&&std::wcscmp(argv[1],L"--install-bundled")==0)){
+        ohno::SchoolBootstrap config;
+        const auto result=ohno::read_school_bundle(config);
+        if(result==ohno::BootstrapResult::Ready){
+            const int code=install(config.server.c_str(),nullptr,&config.certificate_pem);
+            if(argc==1)MessageBoxW(nullptr,
+                code==0?L"Ohno 已安装，服务已自动启动。请在教师端批准设备。":
+                L"Ohno 安装失败，请检查系统服务与程序目录，或联系学校 IT。",
+                L"Ohno 学生端",MB_OK|(code==0?MB_ICONINFORMATION:MB_ICONERROR));
+            return code;
+        }
+        if(argc==2 || result==ohno::BootstrapResult::Invalid){
+            if(argc==1)MessageBoxW(nullptr,L"学校专属安装包配置损坏。请重新从教师端下载。",
+                L"Ohno",MB_OK|MB_ICONERROR);
+            return 1;
+        }
+        // Official generic download: a small native window, never a terminal.
+        // School-issued EXEs have the embedded configuration and skip this UI.
+        return ohno::show_install_wizard(
+            [](const wchar_t* url,const wchar_t* cert)->int{return install(url,cert);});
+    }
     if(argc==3&&std::wcscmp(argv[1],L"--install")==0)return install(argv[2],nullptr);
     if(argc==5&&std::wcscmp(argv[1],L"--install")==0&&std::wcscmp(argv[3],L"--certificate")==0)return install(argv[2],argv[4]);
     if(argc==2&&std::wcscmp(argv[1],L"--remove")==0)return remove();
-    std::fwprintf(stderr,L"Usage: ohno-setup.exe --install https://teacher:8443 [--certificate cert.pem] | --remove\n");return 2;
+    std::fwprintf(stderr,L"Usage: double-click Ohno-School-Setup.exe, or --install HTTPS_ORIGIN [--certificate FILE], --remove\n");
+    return 2;
 }
