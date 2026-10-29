@@ -22,7 +22,7 @@ test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-
 	./json-test
 	./smbios-test
 	./tun-config-test
-	./mac-identity-test setup-bundle-test
+	./mac-identity-test
 	./setup-bundle-test
 clean:
-	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test
+	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test
