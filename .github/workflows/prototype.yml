@@ -99,13 +99,16 @@ jobs:
           $p = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
           if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Runner is not elevated' }
           try {
-            & .\ohno-setup.exe --install https://localhost:8443
-            if ($LASTEXITCODE -ne 0) { throw 'Installer failed' }
+            # PowerShell may not wait for GUI-subsystem programs when invoked with &.
+            $setup = (Resolve-Path .\ohno-setup.exe).Path
+            $installed = Start-Process -FilePath $setup -ArgumentList @('--install','https://localhost:8443') -Wait -PassThru
+            if ($installed.ExitCode -ne 0) { throw 'Installer failed' }
             & sc.exe query OhnoPrototype
             if ($LASTEXITCODE -ne 0) { throw 'Service missing' }
           } finally {
-            & .\ohno-setup.exe --remove
-            if ($LASTEXITCODE -ne 0) { throw 'Uninstall failed' }
+            $setup = (Resolve-Path .\ohno-setup.exe).Path
+            $removed = Start-Process -FilePath $setup -ArgumentList @('--remove') -Wait -PassThru
+            if ($removed.ExitCode -ne 0) { throw 'Uninstall failed' }
           }
       - name: Upload client prototype
         uses: actions/upload-artifact@v4
