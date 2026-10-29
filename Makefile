@@ -15,11 +15,14 @@ tun-config-test: tests/tun_config_test.cpp src/tun_config.hpp src/json.hpp src/p
 	$(CXX) $(CXXFLAGS) -Isrc tests/tun_config_test.cpp src/policy.cpp -o $@
 mac-identity-test: tests/mac_identity_test.cpp src/mac_identity.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/mac_identity_test.cpp -o $@
-test: policy-test json-test smbios-test tun-config-test mac-identity-test
+setup-bundle-test: tests/setup_bundle_test.cpp windows/setup_bundle.hpp
+	$(CXX) $(CXXFLAGS) tests/setup_bundle_test.cpp -o $@
+test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test
 	./policy-test
 	./json-test
 	./smbios-test
 	./tun-config-test
-	./mac-identity-test
+	./mac-identity-test setup-bundle-test
+	./setup-bundle-test
 clean:
 	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test
