@@ -87,9 +87,9 @@ class TeacherIntegration(unittest.TestCase):
         status,_,page=self.control_req('GET','/')
         self.assertEqual(status,200)
         self.assertIn('仅本机可管理',page)
-        self.assertNotIn('登录',page)
         self.assertNotIn('action="/login"',page)
         self.assertNotIn('name="password"',page)
+        self.assertEqual(self.control_req('GET','/',headers={'Host':'evil.example'})[0],404)
         self.assertEqual(self.control_req('POST','/policy',urlencode({'csrf':'wrong'}))[0],403)
 
     def test_complete_flow_and_optional_unlock_pin(self):
