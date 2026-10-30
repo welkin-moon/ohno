@@ -180,6 +180,19 @@ class TeacherIntegration(unittest.TestCase):
             context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(cert,key)
             with self.assertRaises(FileExistsError):create_certificate(cert,key,'localhost')
 
+    def test_legacy_management_password_hash_is_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'legacy.json'
+            legacy={'version':1,'salt':'00'*16,'password_hash':'deadbeef',
+                    'policy_revision':0,'web_domains':[],'program_hashes':[],
+                    'program_names':[],'block_local_files':False,'devices':{},'requests':[]}
+            path.write_text(json.dumps(legacy),encoding='utf-8')
+            loaded=Store(path)
+            self.assertIsNone(loaded.data['unlock_pin_hash'])
+            saved=json.loads(path.read_text('utf-8'))
+            self.assertNotIn('salt',saved)
+            self.assertNotIn('password_hash',saved)
+
     def test_state_no_overwrite(self):
         with self.assertRaises(FileExistsError):Store.initialize(self.store.path)
 
