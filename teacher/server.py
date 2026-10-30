@@ -16,25 +16,25 @@ import webbrowser
 import tempfile
 import threading
 import time
-from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
 from school_installer import build_school_installer
 
 MAX_BODY = 65536
-ITERATIONS = 310000
+PIN_ITERATIONS = 160000
 HOSTNAME = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[A-Za-z0-9_-]{16,128}\Z')
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 PROGRAM_NAME = re.compile(r'[a-z0-9_. -]{1,128}\.exe\Z')
+PIN = re.compile(r'[0-9]{4,8}\Z')
 DEFAULT_WEB = ['classic.minecraft.net', 'eaglercraft.com']
 DEFAULT_GAMES = ['plantsvszombies.exe','plantsvszombiesoriginal.exe','slaythespire.exe','gta3.exe','gta-vc.exe','gta_sa.exe','gtaiv.exe','minecraftlauncher.exe','minecraft.windows.exe']
 
 
-def password_hash(password, salt):
-    return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), ITERATIONS).hex()
+def pin_hash(pin, salt):
+    return hashlib.pbkdf2_hmac('sha256', pin.encode('ascii'), bytes.fromhex(salt), PIN_ITERATIONS).hex()
 
 
 def esc(value):
@@ -57,74 +57,78 @@ class Store:
     def __init__(self, path):
         self.path = Path(path)
         self.lock = threading.RLock()
-        self.sessions = {}
         self.attempts = {}
         self.data = json.loads(self.path.read_text('utf-8'))
         if self.data.get('version') != 1:
             raise ValueError('Unsupported state version')
+        # alpha.3 used one heavyweight password for both local management and
+        # student-side unlock. Local management is now loopback-only and has no
+        # login; keep only an optional short classroom unlock PIN.
+        self.data.pop('salt', None)
+        self.data.pop('password_hash', None)
+        self.data.setdefault('unlock_pin_salt', None)
+        self.data.setdefault('unlock_pin_hash', None)
 
     @classmethod
-    def initialize(cls, path, password):
+    def initialize(cls, path):
         p = Path(path)
         if p.exists():
             raise FileExistsError('State already exists')
-        if len(password) < 12:
-            raise ValueError('Password must contain at least 12 characters')
         p.parent.mkdir(parents=True, exist_ok=True)
-        salt = secrets.token_hex(16)
-        state = {'version': 1, 'salt': salt, 'password_hash': password_hash(password, salt),
-                 'policy_revision': 0, 'web_domains': DEFAULT_WEB[:], 'program_hashes': [], 'program_names': DEFAULT_GAMES[:], 'block_local_files': False,
+        state = {'version': 1, 'unlock_pin_salt': None, 'unlock_pin_hash': None,
+                 'policy_revision': 0, 'web_domains': DEFAULT_WEB[:], 'program_hashes': [],
+                 'program_names': DEFAULT_GAMES[:], 'block_local_files': False,
                  'devices': {}, 'requests': []}
-        # Exclusive creation prevents accidental overwrite.
         fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(state, f, ensure_ascii=False)
+        with os.fdopen(fd, 'w', encoding='utf-8') as file:
+            json.dump(state, file, ensure_ascii=False)
         return cls(p)
 
     def save(self):
-        # Caller holds lock. Atomic replacement is in the same directory.
         fd, name = tempfile.mkstemp(prefix='.ohno-', dir=str(self.path.parent))
         try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, ensure_ascii=False, separators=(',', ':'))
-                f.flush()
-                os.fsync(f.fileno())
+            with os.fdopen(fd, 'w', encoding='utf-8') as file:
+                json.dump(self.data, file, ensure_ascii=False, separators=(',', ':'))
+                file.flush()
+                os.fsync(file.fileno())
             os.replace(name, self.path)
         finally:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def verify_password(self, password, address):
+    def set_unlock_pin(self, pin):
         with self.lock:
+            if pin is None:
+                self.data['unlock_pin_salt'] = None
+                self.data['unlock_pin_hash'] = None
+            else:
+                if not isinstance(pin, str) or not PIN.fullmatch(pin):
+                    raise ValueError('Unlock PIN must be 4-8 digits')
+                salt = secrets.token_hex(16)
+                self.data['unlock_pin_salt'] = salt
+                self.data['unlock_pin_hash'] = pin_hash(pin, salt)
+            self.attempts.clear()
+            self.save()
+
+    def verify_unlock_pin(self, pin, address):
+        if not isinstance(pin, str) or not PIN.fullmatch(pin):
+            return False
+        with self.lock:
+            salt = self.data.get('unlock_pin_salt')
+            expected = self.data.get('unlock_pin_hash')
+            if not salt or not expected:
+                return False
             now = time.monotonic()
             attempts = [x for x in self.attempts.get(address, []) if now - x < 300]
             if len(attempts) >= 8:
                 self.attempts[address] = attempts
                 return False
-            if not hmac.compare_digest(password_hash(password, self.data['salt']), self.data['password_hash']):
+            if not hmac.compare_digest(pin_hash(pin, salt), expected):
                 attempts.append(now)
                 self.attempts[address] = attempts
                 return False
             self.attempts.pop(address, None)
             return True
-
-    def authenticate(self, password, address):
-        if not self.verify_password(password, address):
-            return None
-        with self.lock:
-            now = time.monotonic()
-            token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-            self.sessions[token] = (csrf, now + 3600)
-            return token, csrf
-
-    def session(self, token):
-        with self.lock:
-            now = time.monotonic()
-            entry = self.sessions.get(token)
-            if not entry or entry[1] <= now:
-                self.sessions.pop(token, None)
-                return None
-            return entry[0]
 
     def device(self, dev_id, key, require_approved=True):
         with self.lock:
@@ -140,16 +144,27 @@ STYLE = '''<style>body{font:16px system-ui,sans-serif;max-width:1050px;margin:2r
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'ohno-teacher/0.1'
+    server_version = 'ohno-teacher/0.2'
     sys_version = ''
 
     def log_message(self, fmt, *args):
-        # Never log paths, query parameters, headers, passwords, or device keys.
+        # Device keys, PINs and policy contents must never enter logs.
         pass
 
     @property
     def store(self):
         return self.server.store
+
+    def is_control(self):
+        if not getattr(self.server, 'control', False):
+            return False
+        try:
+            if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                return False
+        except ValueError:
+            return False
+        host = self.headers.get('Host', '').split(':', 1)[0].lower()
+        return host in ('127.0.0.1', 'localhost')
 
     def reply(self, status, data, content_type='text/plain; charset=utf-8', headers=()):
         body = data.encode('utf-8') if isinstance(data, str) else data
@@ -177,26 +192,31 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length)
 
-    def cookie(self):
-        jar = cookies.SimpleCookie()
-        try:
-            jar.load(self.headers.get('Cookie', ''))
-            return jar['ohno_session'].value if 'ohno_session' in jar else ''
-        except cookies.CookieError:
-            return ''
-
-    def redirect(self, location, headers=()):
-        self.reply(303, '', headers=[('Location', location), *headers])
+    def redirect(self, location):
+        self.reply(303, '', headers=[('Location', location)])
 
     def page(self, title, content):
         self.reply(200, '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title>' + STYLE + '<body>' + content + '</body></html>', 'text/html; charset=utf-8')
 
     def do_GET(self):
         if self.path == '/health':
-            return self.json_reply(200, {'ok': True})
+            return self.json_reply(200, {'ok': True, 'control': bool(getattr(self.server, 'control', False))})
+        if self.path == '/api/device/policy':
+            if getattr(self.server, 'control', False):
+                return self.reply(404, 'Not found')
+            dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
+            with self.store.lock:
+                if not self.store.device(dev_id, key):
+                    return self.json_reply(403, {'error': 'not authorized or pending'})
+                data = self.store.data
+                grants = [dict(id=x['id'], kind=x['kind'], object=x['object'], expires=x.get('expires',0))
+                          for x in data['requests'] if x['device_id'] == dev_id and x['state'] == 'approved' and x.get('expires',0) > time.time()]
+                return self.json_reply(200, {'revision': data['policy_revision'], 'web_domains': data['web_domains'],
+                    'program_hashes': data['program_hashes'], 'program_names': data.get('program_names', []),
+                    'block_local_files': data.get('block_local_files', False), 'grants': grants})
+        if not self.is_control():
+            return self.reply(404, 'Not found')
         if self.path == '/school-installer':
-            if not self.store.session(self.cookie()):
-                return self.reply(403, 'Teacher login required')
             setup_exe = getattr(self.server, 'school_installer_exe', None)
             origin = getattr(self.server, 'enrollment_origin', None)
             cert_pem = getattr(self.server, 'public_certificate', None)
@@ -208,28 +228,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(503, 'Cannot prepare school installer')
             return self.reply(200, packaged, 'application/octet-stream',
                               [('Content-Disposition', 'attachment; filename="Ohno-School-Setup.exe"')])
-        if self.path == '/api/device/policy':
-            dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
-            with self.store.lock:
-                if not self.store.device(dev_id, key):
-                    return self.json_reply(403, {'error': 'not authorized or pending'})
-                d = self.store.data
-                grants = [dict(id=x['id'], kind=x['kind'], object=x['object'], expires=x.get('expires',0)) for x in d['requests'] if x['device_id'] == dev_id and x['state'] == 'approved' and x.get('expires',0) > time.time()]
-                return self.json_reply(200, {'revision': d['policy_revision'], 'web_domains': d['web_domains'], 'program_hashes': d['program_hashes'], 'program_names': d.get('program_names', []), 'block_local_files': d.get('block_local_files', False), 'grants': grants})
         if self.path != '/':
             return self.reply(404, 'Not found')
-        csrf = self.store.session(self.cookie())
-        if not csrf:
-            return self.page('ohno 登录', '<h1>ohno 教师端</h1><section><form method="post" action="/login"><label>管理密码 <input name="password" type="password" autocomplete="current-password" required></label> <button>登录</button></form></section>')
+        csrf = self.server.control_csrf
         with self.store.lock:
-            d = self.store.data
-            devices = list(d['devices'].items())
-            requests = list(d['requests'])[-100:][::-1]
-            domains = '\n'.join(d['web_domains'])
-            hashes = '\n'.join(d['program_hashes'])
-            names = '\n'.join(d.get('program_names', []))
-            block_local_files = d.get('block_local_files', False)
-            revision = d['policy_revision']
+            data = self.store.data
+            devices = list(data['devices'].items())
+            requests = list(data['requests'])[-100:][::-1]
+            domains = '\n'.join(data['web_domains'])
+            hashes = '\n'.join(data['program_hashes'])
+            names = '\n'.join(data.get('program_names', []))
+            block_local_files = data.get('block_local_files', False)
+            revision = data['policy_revision']
+            pin_enabled = bool(data.get('unlock_pin_hash'))
         hidden = '<input type="hidden" name="csrf" value="' + esc(csrf) + '">'
         rows = []
         for dev_id, dev in devices:
@@ -254,8 +265,8 @@ class Handler(BaseHTTPRequestHandler):
                         '</td><td>' + mac_text + '</td><td>' + esc(dev.get('last_ip') or '未知') +
                         '</td><td>' + status + ' / ' +
                         ('在线' if time.time()-dev.get('last_seen',0)<60 else '离线') +
-                        ' / TUN 进程: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') +
-                        ' / WFP 引擎: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') +
+                        ' / TUN: ' + ('运行' if dev.get('tun') is True else '不可用' if dev.get('tun') is False else '未知') +
+                        ' / WFP: ' + ('可用' if dev.get('wfp') is True else '不可用' if dev.get('wfp') is False else '未知') +
                         '</td><td>' + action + '</td></tr>')
         req_rows = []
         for item in requests:
@@ -263,13 +274,13 @@ class Handler(BaseHTTPRequestHandler):
             if item['state'] == 'pending':
                 action = '<form method="post" action="/request">' + hidden + '<input type="hidden" name="id" value="' + esc(item['id']) + '"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>'
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
-        content = '<h1>ohno 教师端</h1><p>策略版本 ' + str(revision) + '</p><form method="post" action="/logout">' + hidden + '<button>退出</button></form>'
-        content += '<section><h2>网站规则</h2><p><small>每行一个域名；客户端决定实际拦截方式。</small></p><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256（每行一个）<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名（每行一个）<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件（可能影响本地课件及 PDF，覆盖不保证）</label></p><button>保存规则</button></form></section>'
+        content = '<h1>ohno 教师端</h1><p>仅本机可管理 · 策略版本 ' + str(revision) + '</p>'
+        content += '<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；它不是后台管理密码。当前：<strong>' + ('已启用' if pin_enabled else '关闭') + '</strong></p><form method="post" action="/unlock-pin">' + hidden + '<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>'
+        content += '<section><h2>网站与程序规则</h2><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件</label></p><button>保存规则</button></form></section>'
         if getattr(self.server, 'school_installer_exe', None) and getattr(self.server, 'enrollment_origin', None):
-            content += '<section><h2>学生机一键安装</h2><p>下载此学校专属 EXE，在模板机双击并允许一次 UAC 即可安装；无需命令行。证书与服务器地址已写入安装包，不含教师密码或私钥。</p><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a></p><p><small>发布前应由学校 IT 核验教师服务器名称，先在一台可恢复的测试机试装。证书会进入这台机器的受信任根证书存储。</small></p></section>'
-        content += '<section><h2>设备</h2><p><small>MAC 在教师审批时绑定；IP 仅作当前连接参考，变动不影响身份。MAC 可伪造，实际认证仍要求设备密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>已绑定 / 发现 MAC</th><th>最近连接 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
+            content += '<section><h2>学生机一键安装</h2><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a>；复制到模板机双击、允许 UAC 即可。</p><small>包内只有教师 API 地址和公开证书，没有教师 PIN、密码或私钥。</small></section>'
+        content += '<section><h2>设备</h2><p><small>MAC 用于设备关联；DHCP IP 仅显示最近地址。真正认证仍使用每机独立密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>MAC</th><th>最近 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
-        content += '<p><small>ohno 是自由软件：<a href="https://github.com/welkin-moon/ohno">查看源码与许可证</a></small></p>'
         return self.page('ohno 教师端', content)
 
     def do_POST(self):
@@ -277,6 +288,8 @@ class Handler(BaseHTTPRequestHandler):
         if raw is None:
             return self.reply(413, 'Invalid request length')
         if self.path.startswith('/api/device/'):
+            if getattr(self.server, 'control', False):
+                return self.reply(404, 'Not found')
             try:
                 data = json.loads(raw)
                 if not isinstance(data, dict): raise ValueError()
@@ -289,25 +302,27 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/device/unlock':
                 return self.unlock_device(data)
             return self.json_reply(404, {'error': 'not found'})
+        if not self.is_control():
+            return self.reply(404, 'Not found')
         try:
             form = parse_qs(raw.decode('utf-8'), keep_blank_values=True, max_num_fields=20)
         except (ValueError, UnicodeError):
             return self.reply(400, 'Invalid form')
-        one = lambda k: form.get(k, [''])[0]
-        if self.path == '/login':
-            result = self.store.authenticate(one('password'), self.client_address[0])
-            if not result:
-                return self.reply(403, 'Login failed or temporarily rate limited')
-            token, _ = result
-            return self.redirect('/', [('Set-Cookie', 'ohno_session=' + token + '; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=3600')])
-        token = self.cookie()
-        csrf = self.store.session(token)
-        if not csrf or not hmac.compare_digest(csrf, one('csrf')):
-            return self.reply(403, 'Invalid session or CSRF token')
-        if self.path == '/logout':
-            with self.store.lock:
-                self.store.sessions.pop(token, None)
-            return self.redirect('/', [('Set-Cookie', 'ohno_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0')])
+        one = lambda key: form.get(key, [''])[0]
+        if not hmac.compare_digest(self.server.control_csrf, one('csrf')):
+            return self.reply(403, 'Invalid CSRF token')
+        if self.path == '/unlock-pin':
+            action = one('action')
+            if action == 'clear':
+                self.store.set_unlock_pin(None)
+            elif action == 'set':
+                try:
+                    self.store.set_unlock_pin(one('pin'))
+                except ValueError:
+                    return self.reply(400, 'PIN must be 4-8 digits')
+            else:
+                return self.reply(400, 'Invalid PIN action')
+            return self.redirect('/')
         with self.store.lock:
             if self.path == '/policy':
                 domains = sorted(set(x.strip().lower() for x in one('domains').splitlines() if x.strip()))
@@ -315,7 +330,9 @@ class Handler(BaseHTTPRequestHandler):
                 names = sorted(set(x.strip().lower() for x in one('names').splitlines() if x.strip()))
                 if len(domains) + (1 if one('block_local_files') == '1' else 0) > 1000 or len(hashes) > 1000 or len(names) > 1000 or any(not HOSTNAME.fullmatch(x) for x in domains) or any(not HASH.fullmatch(x) for x in hashes) or any(not PROGRAM_NAME.fullmatch(x) for x in names):
                     return self.reply(400, 'Invalid domains or SHA-256 values')
-                self.store.data.update(web_domains=domains, program_hashes=hashes, program_names=names, block_local_files=(one('block_local_files') == '1'), policy_revision=self.store.data['policy_revision']+1)
+                self.store.data.update(web_domains=domains, program_hashes=hashes, program_names=names,
+                                       block_local_files=(one('block_local_files') == '1'),
+                                       policy_revision=self.store.data['policy_revision']+1)
             elif self.path == '/device':
                 dev = self.store.data['devices'].get(one('id'))
                 if not dev or one('approved') not in ('0', '1'):
@@ -324,7 +341,6 @@ class Handler(BaseHTTPRequestHandler):
                     primary = dev.get('primary_mac', '')
                     if not valid_mac(primary) or primary not in dev.get('macs', []):
                         return self.reply(400, 'No valid hardware MAC to bind')
-                    # A MAC conflict must be investigated, not silently auto-approved.
                     for other_id, other in self.store.data['devices'].items():
                         if other_id != one('id') and other.get('approved') and other.get('bound_mac') in dev.get('macs', []):
                             return self.reply(409, 'MAC already bound to another approved device')
@@ -337,7 +353,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not item or item['state'] != 'pending' or one('action') not in ('approve', 'deny'):
                     return self.reply(400, 'Invalid request')
                 item['state'] = 'approved' if one('action') == 'approve' else 'denied'
-                if item['state'] == 'approved': item['expires'] = int(time.time()) + 3600
+                if item['state'] == 'approved':
+                    item['expires'] = int(time.time()) + 3600
             else:
                 return self.reply(404, 'Not found')
             self.store.save()
@@ -378,13 +395,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def unlock_device(self, data):
         dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
-        password = data.get('password')
-        if not isinstance(password, str) or len(password) > 512:
-            return self.json_reply(400, {'error': 'invalid password'})
+        # Accept alpha.3's field name for a transition period, but the value is
+        # now a dedicated short classroom PIN rather than a management password.
+        pin = data.get('pin', data.get('password'))
+        if not isinstance(pin, str) or not PIN.fullmatch(pin):
+            return self.json_reply(400, {'error': 'invalid unlock PIN'})
         if not self.store.device(dev_id, key):
             return self.json_reply(403, {'error': 'device not authorized'})
-        if not self.store.verify_password(password, 'device:' + dev_id):
-            return self.json_reply(403, {'error': 'invalid password or temporarily rate limited'})
+        if not self.store.verify_unlock_pin(pin, 'device:' + dev_id):
+            return self.json_reply(403, {'error': 'unlock disabled, invalid PIN, or temporarily rate limited'})
         with self.store.lock:
             if not self.store.device(dev_id, key):
                 return self.json_reply(403, {'error': 'device not authorized'})
@@ -465,31 +484,48 @@ def locate_base_installer():
     return None
 
 
-def serve_teacher(state, cert, key, bind, port, enrollment_host=None, open_browser=False):
+def serve_teacher(state, cert, key, bind, port, enrollment_host=None, open_browser=False, control_port=8765):
     store = Store(state)
-    server = ThreadingHTTPServer((bind, port), Handler)
-    server.store = store
-    server.school_installer_exe = locate_base_installer()
-    if enrollment_host and server.school_installer_exe:
-        server.enrollment_origin = 'https://' + enrollment_host + ':' + str(port)
-        server.public_certificate = Path(cert).read_bytes()
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(cert, key)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
-    print('ohno HTTPS server listening on %s:%d' % server.server_address)
+
+    # LAN-facing student API: HTTPS only, no teacher management routes.
+    api = ThreadingHTTPServer((bind, port), Handler)
+    api.store = store
+    api.control = False
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(cert, key)
+    api.socket = context.wrap_socket(api.socket, server_side=True)
+
+    # Teacher control plane: plain HTTP is safe here because the socket is
+    # physically bound to loopback. No password, no LAN exposure, no cert warning.
+    control = ThreadingHTTPServer(('127.0.0.1', control_port), Handler)
+    control.store = store
+    control.control = True
+    control.control_csrf = secrets.token_urlsafe(32)
+    control.school_installer_exe = locate_base_installer()
+    if enrollment_host and control.school_installer_exe:
+        control.enrollment_origin = 'https://' + enrollment_host + ':' + str(port)
+        control.public_certificate = Path(cert).read_bytes()
+
+    api_thread = threading.Thread(target=api.serve_forever, daemon=True)
+    api_thread.start()
+    print('ohno student API listening on https://%s:%d' % api.server_address)
+    print('ohno teacher control listening on http://127.0.0.1:%d' % control.server_port)
     if open_browser:
-        webbrowser.open('https://localhost:' + str(port) + '/', new=2)
+        webbrowser.open('http://127.0.0.1:' + str(control.server_port) + '/', new=2)
     try:
-        server.serve_forever()
+        control.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        control.server_close()
+        api.shutdown()
+        api.server_close()
+        api_thread.join(timeout=5)
 
 
 def easy_start():
-    """First-run teacher setup: double-click, remember one random password, manage in browser."""
+    """Double-click teacher app: initialize local state and open local control UI."""
     home = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'OhnoTeacher'
     home.mkdir(parents=True, exist_ok=True)
     state, cert, key = home/'state.json', home/'teacher-cert.pem', home/'teacher-key.pem'
@@ -500,20 +536,8 @@ def easy_start():
         create_certificate(cert, key, hostname)
     elif not (cert.exists() and key.exists()):
         raise RuntimeError('Incomplete teacher certificate files. Restore the matching cert/key pair.')
-    password = None
     if not state.exists():
-        password = secrets.token_urlsafe(20)
-        Store.initialize(state, password)
-    if password:
-        # Secret is shown once. Never save it as plaintext or log it.
-        if os.name == 'nt':
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(None,
-                'Ohno 教师端已初始化。\n\n教师管理密码（只显示这一次）：\n' + password +
-                '\n\n请记录密码并妥善保存。浏览器随后会打开管理页面。',
-                'Ohno 初次设置', 0x40)
-        else:
-            print('Ohno teacher password (shown once):', password)
+        Store.initialize(state)
     serve_teacher(str(state),str(cert),str(key),'0.0.0.0',8443,hostname,open_browser=True)
 
 
@@ -523,6 +547,7 @@ def main():
         return
     p = argparse.ArgumentParser(description='ohno teacher HTTPS service')
     p.add_argument('--state', help='Path to private writable state file')
+    p.add_argument('--control-port', type=int, default=8765, help='Loopback-only teacher UI port')
     p.add_argument('--init', action='store_true', help='Create state and teacher password interactively')
     p.add_argument('--generate-certificate', action='store_true', help='Generate a local HTTPS certificate')
     p.add_argument('--host', help='Hostname or IP for certificate')
@@ -538,15 +563,11 @@ def main():
         return
     if not args.state: p.error('--state is required')
     if args.init:
-        import getpass
-        first = getpass.getpass('Teacher password (12+ chars): ')
-        second = getpass.getpass('Repeat password: ')
-        if first != second: p.error('Passwords do not match')
-        Store.initialize(args.state, first)
-        print('State initialized.')
+        Store.initialize(args.state)
+        print('State initialized. Teacher management is loopback-only and has no login password.')
         return
     if not args.cert or not args.key: p.error('HTTPS certificate and private key are required')
-    serve_teacher(args.state,args.cert,args.key,args.bind,args.port,args.host)
+    serve_teacher(args.state,args.cert,args.key,args.bind,args.port,args.host,control_port=args.control_port)
 
 if __name__ == '__main__':
     main()
