@@ -64,10 +64,17 @@ class Store:
         # alpha.3 used one heavyweight password for both local management and
         # student-side unlock. Local management is now loopback-only and has no
         # login; keep only an optional short classroom unlock PIN.
+        migrated = 'salt' in self.data or 'password_hash' in self.data
         self.data.pop('salt', None)
         self.data.pop('password_hash', None)
-        self.data.setdefault('unlock_pin_salt', None)
-        self.data.setdefault('unlock_pin_hash', None)
+        if 'unlock_pin_salt' not in self.data:
+            self.data['unlock_pin_salt'] = None
+            migrated = True
+        if 'unlock_pin_hash' not in self.data:
+            self.data['unlock_pin_hash'] = None
+            migrated = True
+        if migrated:
+            self.save()
 
     @classmethod
     def initialize(cls, path):
