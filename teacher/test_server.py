@@ -72,7 +72,8 @@ class TeacherIntegration(unittest.TestCase):
     def csrf(self):
         status,_,page=self.control_req('GET','/')
         self.assertEqual(status,200)
-        self.assertNotIn('管理密码',page)
+        self.assertNotIn('action="/login"',page)
+        self.assertNotIn('name="password"',page)
         return re.search(r'name="csrf" value="([^"]+)',page).group(1)
 
     def form(self,path,values):
@@ -87,7 +88,8 @@ class TeacherIntegration(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertIn('仅本机可管理',page)
         self.assertNotIn('登录',page)
-        self.assertNotIn('管理密码',page)
+        self.assertNotIn('action="/login"',page)
+        self.assertNotIn('name="password"',page)
         self.assertEqual(self.control_req('POST','/policy',urlencode({'csrf':'wrong'}))[0],403)
 
     def test_complete_flow_and_optional_unlock_pin(self):
