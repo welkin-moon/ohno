@@ -77,7 +77,7 @@ def main():
             adapter=subprocess.run(['powershell','-NoProfile','-Command',"if (Get-NetAdapter -Name 'ohno-tun' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"])
             if adapter.returncode:raise RuntimeError('TUN adapter not found')
             status,_,page=control_call('GET','/');assert status==200
-            if '管理密码' in page or '登录' in page: raise RuntimeError('teacher control unexpectedly requires login')
+            if 'action="/login"' in page or 'name="password"' in page: raise RuntimeError('teacher control unexpectedly exposes a login form')
             csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
             form('/unlock-pin',{'csrf':csrf,'action':'set','pin':pin})
             form('/device',{'csrf':csrf,'id':device,'approved':'1'})
