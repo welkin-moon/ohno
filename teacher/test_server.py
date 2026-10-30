@@ -1,6 +1,5 @@
 import http.client
 import json
-import os
 import re
 import ssl
 import subprocess
@@ -9,9 +8,10 @@ import threading
 import unittest
 from pathlib import Path
 from urllib.parse import urlencode
+from http.server import ThreadingHTTPServer
+
 from server import Handler, Store, create_certificate
 from school_installer import get_school_configuration
-from http.server import ThreadingHTTPServer
 
 
 class TeacherIntegration(unittest.TestCase):
@@ -19,121 +19,158 @@ class TeacherIntegration(unittest.TestCase):
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
         root = Path(cls.temp.name)
-        cls.store = Store.initialize(root/'state.json', 'a-strong-test-password')
-        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'key.pem'),'-out',str(root/'cert.pem'),'-days','1','-subj','/CN=localhost'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        cls.server = ThreadingHTTPServer(('127.0.0.1',0), Handler)
-        cls.server.store = cls.store
-        cls.server.school_installer_exe = root/'ohno-setup.exe'
-        cls.server.school_installer_exe.write_bytes(b'MZ'+bytes(5000))
-        cls.server.enrollment_origin = 'https://teacher-pc:8443'
-        cls.server.public_certificate = (root/'cert.pem').read_bytes()
+        cls.store = Store.initialize(root/'state.json')
+        subprocess.run([
+            'openssl','req','-x509','-newkey','rsa:2048','-nodes',
+            '-keyout',str(root/'key.pem'),'-out',str(root/'cert.pem'),
+            '-days','1','-subj','/CN=localhost'
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        cls.api = ThreadingHTTPServer(('127.0.0.1',0), Handler)
+        cls.api.store = cls.store
+        cls.api.control = False
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(root/'cert.pem',root/'key.pem')
-        cls.server.socket = context.wrap_socket(cls.server.socket,server_side=True)
-        cls.thread = threading.Thread(target=cls.server.serve_forever,daemon=True)
-        cls.thread.start()
+        cls.api.socket = context.wrap_socket(cls.api.socket,server_side=True)
+
+        cls.control = ThreadingHTTPServer(('127.0.0.1',0), Handler)
+        cls.control.store = cls.store
+        cls.control.control = True
+        cls.control.control_csrf = 'test-control-csrf'
+        cls.control.school_installer_exe = root/'ohno-setup.exe'
+        cls.control.school_installer_exe.write_bytes(b'MZ'+bytes(5000))
+        cls.control.enrollment_origin = 'https://teacher-pc:8443'
+        cls.control.public_certificate = (root/'cert.pem').read_bytes()
+
+        cls.threads = [
+            threading.Thread(target=cls.api.serve_forever,daemon=True),
+            threading.Thread(target=cls.control.serve_forever,daemon=True),
+        ]
+        for thread in cls.threads: thread.start()
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown(); cls.server.server_close(); cls.thread.join(); cls.temp.cleanup()
+        for server in (cls.api,cls.control): server.shutdown(); server.server_close()
+        for thread in cls.threads: thread.join()
+        cls.temp.cleanup()
 
-    def req(self,method,path,body=None,headers=None):
-        c = http.client.HTTPSConnection('127.0.0.1',self.server.server_port,context=ssl._create_unverified_context(),timeout=5)
-        c.request(method,path,body,headers or {})
-        r=c.getresponse(); result=(r.status,dict(r.getheaders()),r.read().decode());c.close();return result
+    def api_req(self,method,path,body=None,headers=None,raw=False):
+        connection=http.client.HTTPSConnection('127.0.0.1',self.api.server_port,
+            context=ssl._create_unverified_context(),timeout=5)
+        headers=dict(headers or {});headers.setdefault('Host','teacher-pc')
+        connection.request(method,path,body,headers)
+        response=connection.getresponse();payload=response.read();result=(response.status,dict(response.getheaders()),payload if raw else payload.decode())
+        connection.close();return result
 
-    def test_complete_flow(self):
-        status, _, _ = self.req('POST','/login',urlencode({'password':'wrong'})); self.assertEqual(status,403)
-        status, headers, _ = self.req('POST','/login',urlencode({'password':'a-strong-test-password'})); self.assertEqual(status,303)
-        cookie=headers['Set-Cookie'].split(';')[0]
-        status, _, page=self.req('GET','/',headers={'Cookie':cookie});self.assertEqual(status,200)
-        csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
-        status, _, _ = self.req('POST','/policy',urlencode({'csrf':'wrong','domains':'games.example'}),{'Cookie':cookie});self.assertEqual(status,403)
-        status, _, _ = self.req('POST','/policy',urlencode({'csrf':csrf,'domains':'games.example\nbad domain','hashes':''}),{'Cookie':cookie});self.assertEqual(status,400)
-        status, _, _ = self.req('POST','/policy',urlencode({'csrf':csrf,'domains':'games.example','hashes':'a'*64,'names':'gta3.exe','block_local_files':'1'}),{'Cookie':cookie});self.assertEqual(status,303)
+    def control_req(self,method,path,body=None,headers=None,raw=False):
+        connection=http.client.HTTPConnection('127.0.0.1',self.control.server_port,timeout=5)
+        headers=dict(headers or {});headers.setdefault('Host','127.0.0.1')
+        connection.request(method,path,body,headers)
+        response=connection.getresponse();payload=response.read();result=(response.status,dict(response.getheaders()),payload if raw else payload.decode())
+        connection.close();return result
+
+    def csrf(self):
+        status,_,page=self.control_req('GET','/')
+        self.assertEqual(status,200)
+        self.assertNotIn('action="/login"',page)
+        self.assertNotIn('name="password"',page)
+        return re.search(r'name="csrf" value="([^"]+)',page).group(1)
+
+    def form(self,path,values):
+        status,_,text=self.control_req('POST',path,urlencode(values))
+        self.assertEqual(status,303,text)
+
+    def test_management_is_loopback_only_and_passwordless(self):
+        self.assertEqual(self.api_req('GET','/')[0],404)
+        self.assertEqual(self.api_req('GET','/school-installer')[0],404)
+        self.assertEqual(self.control_req('POST','/api/device/register','{}')[0],404)
+        status,_,page=self.control_req('GET','/')
+        self.assertEqual(status,200)
+        self.assertIn('仅本机可管理',page)
+        self.assertNotIn('action="/login"',page)
+        self.assertNotIn('name="password"',page)
+        self.assertEqual(self.control_req('GET','/',headers={'Host':'evil.example'})[0],404)
+        self.assertEqual(self.control_req('POST','/policy',urlencode({'csrf':'wrong'}))[0],403)
+
+    def test_complete_flow_and_optional_unlock_pin(self):
+        csrf=self.csrf()
+        status,_,_=self.control_req('POST','/policy',urlencode({'csrf':csrf,'domains':'games.example\nbad domain','hashes':''}))
+        self.assertEqual(status,400)
+        self.form('/policy',{'csrf':csrf,'domains':'games.example','hashes':'a'*64,'names':'gta3.exe','block_local_files':'1'})
+
         dev='A'*24;key='B'*32
-        data=json.dumps({'id':dev,'key':key,'name':'<school-pc>','tun':True,'wfp':True,'macs':['00:15:5d:11:22:33'],'primary_mac':'00:15:5d:11:22:33'})
-        status, _, text=self.req('POST','/api/device/register',data);self.assertEqual(status,201);self.assertFalse(json.loads(text)['approved'])
+        data=json.dumps({'id':dev,'key':key,'name':'<school-pc>','tun':True,'wfp':True,
+                         'macs':['00:15:5d:11:22:33'],'primary_mac':'00:15:5d:11:22:33'})
+        status,_,text=self.api_req('POST','/api/device/register',data)
+        self.assertEqual(status,201);self.assertFalse(json.loads(text)['approved'])
         auth={'X-Ohno-Device':dev,'X-Ohno-Key':key}
-        self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],403)
-        status, _, page=self.req('GET','/',headers={'Cookie':cookie});self.assertIn('&lt;school-pc&gt;',page);self.assertIn('TUN 进程: 运行',page);self.assertIn('WFP 引擎: 可用',page)
-        status, _, _=self.req('POST','/device',urlencode({'csrf':csrf,'id':dev,'approved':'1'}),{'Cookie':cookie});self.assertEqual(status,303)
-        status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['web_domains'],['games.example']);self.assertEqual(json.loads(body)['program_names'],['gta3.exe']);self.assertTrue(json.loads(body)['block_local_files'])
-        status, _, body=self.req('POST','/api/device/request',json.dumps({'kind':'website','object':'games.example','label':'<Game>.exe'}),auth);self.assertEqual(status,201);request_id=json.loads(body)['id']
-        self.assertIn('&lt;Game&gt;.exe',self.req('GET','/',headers={'Cookie':cookie})[2])
-        status, _, _=self.req('POST','/request',urlencode({'csrf':csrf,'id':request_id,'action':'approve'}),{'Cookie':cookie});self.assertEqual(status,303)
-        status, _, body=self.req('GET','/api/device/policy',headers=auth);self.assertEqual(status,200);self.assertEqual(json.loads(body)['grants'][0]['object'],'games.example')
-        self.assertEqual(self.req('POST','/api/device/unlock',json.dumps({'password':'wrong'}),auth)[0],403)
-        self.assertEqual(self.req('POST','/api/device/unlock',json.dumps({'password':'a-strong-test-password'}),auth)[0],201)
-        self.assertTrue(any(x['kind']=='pause' for x in json.loads(self.req('GET','/api/device/policy',headers=auth)[2])['grants']))
-        self.assertEqual(self.req('GET','/api/device/policy',headers={'X-Ohno-Device':dev,'X-Ohno-Key':'wrong'})[0],403)
-        status, _, _=self.req('POST','/device',urlencode({'csrf':csrf,'id':dev,'approved':'0'}),{'Cookie':cookie});self.assertEqual(status,303)
-        self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],403)
-        saved=json.loads(Path(self.store.path).read_text()); self.assertNotIn(key, json.dumps(saved)); self.assertNotIn('a-strong-test-password',json.dumps(saved))
+        self.assertEqual(self.api_req('GET','/api/device/policy',headers=auth)[0],403)
+
+        page=self.control_req('GET','/')[2]
+        self.assertIn('&lt;school-pc&gt;',page)
+        self.form('/device',{'csrf':csrf,'id':dev,'approved':'1'})
+        status,_,body=self.api_req('GET','/api/device/policy',headers=auth)
+        self.assertEqual(status,200);policy=json.loads(body)
+        self.assertEqual(policy['web_domains'],['games.example'])
+        self.assertEqual(policy['program_names'],['gta3.exe'])
+        self.assertTrue(policy['block_local_files'])
+
+        status,_,body=self.api_req('POST','/api/device/request',
+            json.dumps({'kind':'website','object':'games.example','label':'<Game>.exe'}),auth)
+        self.assertEqual(status,201);request_id=json.loads(body)['id']
+        self.assertIn('&lt;Game&gt;.exe',self.control_req('GET','/')[2])
+        self.form('/request',{'csrf':csrf,'id':request_id,'action':'approve'})
+
+        # No PIN exists by default; local teacher management itself still needs no password.
+        self.assertEqual(self.api_req('POST','/api/device/unlock',json.dumps({'pin':'2468'}),auth)[0],403)
+        self.form('/unlock-pin',{'csrf':csrf,'action':'set','pin':'2468'})
+        self.assertEqual(self.api_req('POST','/api/device/unlock',json.dumps({'pin':'0000'}),auth)[0],403)
+        self.assertEqual(self.api_req('POST','/api/device/unlock',json.dumps({'pin':'2468'}),auth)[0],201)
+        self.assertTrue(any(x['kind']=='pause' for x in json.loads(self.api_req('GET','/api/device/policy',headers=auth)[2])['grants']))
+        self.form('/unlock-pin',{'csrf':csrf,'action':'clear','pin':''})
+        self.assertEqual(self.api_req('POST','/api/device/unlock',json.dumps({'pin':'2468'}),auth)[0],403)
+
+        saved=json.loads(Path(self.store.path).read_text())
+        self.assertNotIn(key,json.dumps(saved))
+        self.assertNotIn('2468',json.dumps(saved))
+        self.assertNotIn('password_hash',saved)
 
     def test_mac_binding_rebind_conflicts_and_dhcp(self):
-        dev, key = 'C'*24, 'D'*32
-        first, second = '00:15:5d:11:22:44', '00:15:5d:11:22:45'
-        def reg(device=dev, secret=key, mac=first, source_ip='192.168.1.20'):
-            # Source IP is purely advisory; real last_ip is the HTTP peer address.
-            payload={'id':device,'key':secret,'name':'lab-pc','macs':[mac],'primary_mac':mac,'ip':source_ip}
-            return self.req('POST','/api/device/register',json.dumps(payload))
-        status, _, data=reg();self.assertEqual(status,201);self.assertFalse(json.loads(data)['approved'])
-        self.assertEqual(self.req('POST','/api/device/register',json.dumps(
+        dev,key='C'*24,'D'*32
+        first,second='00:15:5d:11:22:44','00:15:5d:11:22:45'
+        def reg(device=dev,secret=key,mac=first,source_ip='192.168.1.20'):
+            return self.api_req('POST','/api/device/register',json.dumps(
+                {'id':device,'key':secret,'name':'lab-pc','macs':[mac],'primary_mac':mac,'ip':source_ip}))
+        status,_,data=reg();self.assertEqual(status,201);self.assertFalse(json.loads(data)['approved'])
+        self.assertEqual(self.api_req('POST','/api/device/register',json.dumps(
             {'id':dev,'key':key,'name':'lab-pc','macs':[first,first],'primary_mac':first}))[0],400)
-        self.assertEqual(self.req('POST','/api/device/register',json.dumps(
-            {'id':dev,'key':key,'name':'lab-pc','macs':[first],'primary_mac':second}))[0],400)
         auth={'X-Ohno-Device':dev,'X-Ohno-Key':key}
-        status, headers, _=self.req('POST','/login',urlencode({'password':'a-strong-test-password'}));self.assertEqual(status,303)
-        cookie=headers['Set-Cookie'].split(';')[0]
-        status, _, page=self.req('GET','/',headers={'Cookie':cookie});self.assertEqual(status,200)
-        csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
-        def form(device, approved):
-            return self.req('POST','/device',urlencode({'csrf':csrf,'id':device,'approved':approved}),{'Cookie':cookie})[0]
-        self.assertEqual(form(dev,'1'),303)
-        self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],200)
-        # DHCP address changes do not affect registration or binding.
-        status, _, data=reg(source_ip='192.168.1.83');self.assertEqual(status,200);self.assertTrue(json.loads(data)['approved'])
+        csrf=self.csrf()
+        def approve(device,value='1'): return self.control_req('POST','/device',urlencode({'csrf':csrf,'id':device,'approved':value}))[0]
+        self.assertEqual(approve(dev),303)
+        self.assertEqual(self.api_req('GET','/api/device/policy',headers=auth)[0],200)
+        status,_,data=reg(source_ip='192.168.1.83');self.assertEqual(status,200);self.assertTrue(json.loads(data)['approved'])
         self.assertEqual(self.store.data['devices'][dev]['bound_mac'],first)
         self.assertEqual(self.store.data['devices'][dev]['last_ip'],'127.0.0.1')
-        self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],200)
-        # Knowing the MAC without the device key is not an authorization.
         self.assertEqual(reg(secret='wrong-secret-not-accepted')[0],403)
-        status, _, data=reg(mac=second);self.assertEqual(status,200);self.assertFalse(json.loads(data)['approved'])
-        self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],403)
-        self.assertIn('MAC 变更',self.req('GET','/',headers={'Cookie':cookie})[2])
-        self.assertEqual(form(dev,'1'),303)
-        self.assertEqual(self.store.data['devices'][dev]['bound_mac'],second)
-        self.assertEqual(self.req('GET','/api/device/policy',headers=auth)[0],200)
-        # A second record presenting an in-use MAC must never auto-inherit approval.
-        second_dev, second_key = 'E'*24, 'F'*32
+        status,_,data=reg(mac=second);self.assertEqual(status,200);self.assertFalse(json.loads(data)['approved'])
+        self.assertEqual(self.api_req('GET','/api/device/policy',headers=auth)[0],403)
+        self.assertIn('MAC 变更',self.control_req('GET','/')[2])
+        self.assertEqual(approve(dev),303)
+        second_dev,second_key='E'*24,'F'*32
         self.assertEqual(reg(device=second_dev,secret=second_key,mac=second)[0],201)
-        self.assertEqual(form(second_dev,'1'),409)
-        self.assertEqual(form(dev,'0'),303)
-        self.assertEqual(form(second_dev,'1'),303)
-        self.assertEqual(self.store.data['devices'][second_dev]['bound_mac'],second)
-        # Legacy registrations without an available MAC stay pending.
-        old_dev, old_key = 'G'*24, 'H'*32
-        self.assertEqual(self.req('POST','/api/device/register',json.dumps(
-            {'id':old_dev,'key':old_key,'name':'legacy'}))[0],201)
-        self.assertEqual(form(old_dev,'1'),400)
+        self.assertEqual(approve(second_dev),409)
+        self.assertEqual(approve(dev,'0'),303)
+        self.assertEqual(approve(second_dev),303)
 
-    def test_school_installer_download(self):
-        self.assertEqual(self.req('GET','/school-installer')[0],403)
-        status, headers, _=self.req('POST','/login',urlencode({'password':'a-strong-test-password'}))
-        self.assertEqual(status,303)
-        cookie=headers['Set-Cookie'].split(';')[0]
-        connection=http.client.HTTPSConnection('127.0.0.1',self.server.server_port,
-                                               context=ssl._create_unverified_context(),timeout=5)
-        connection.request('GET','/school-installer',headers={'Cookie':cookie})
-        response=connection.getresponse()
-        payload=response.read()
-        self.assertEqual(response.status,200)
-        self.assertIn('Ohno-School-Setup.exe',response.getheader('Content-Disposition'))
-        connection.close()
-        url, cert=get_school_configuration(payload)
+    def test_school_installer_download_from_local_control_only(self):
+        self.assertEqual(self.api_req('GET','/school-installer')[0],404)
+        status,headers,payload=self.control_req('GET','/school-installer',raw=True)
+        self.assertEqual(status,200)
+        self.assertIn('Ohno-School-Setup.exe',headers['Content-Disposition'])
+        url,cert=get_school_configuration(payload)
         self.assertEqual(url,'https://teacher-pc:8443')
-        self.assertEqual(cert,self.server.public_certificate)
+        self.assertEqual(cert,self.control.public_certificate)
         self.assertEqual(payload[:2],b'MZ')
 
     def test_certificate_generation(self):
@@ -143,7 +180,21 @@ class TeacherIntegration(unittest.TestCase):
             context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(cert,key)
             with self.assertRaises(FileExistsError):create_certificate(cert,key,'localhost')
 
+    def test_legacy_management_password_hash_is_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'legacy.json'
+            legacy={'version':1,'salt':'00'*16,'password_hash':'deadbeef',
+                    'policy_revision':0,'web_domains':[],'program_hashes':[],
+                    'program_names':[],'block_local_files':False,'devices':{},'requests':[]}
+            path.write_text(json.dumps(legacy),encoding='utf-8')
+            loaded=Store(path)
+            self.assertIsNone(loaded.data['unlock_pin_hash'])
+            saved=json.loads(path.read_text('utf-8'))
+            self.assertNotIn('salt',saved)
+            self.assertNotIn('password_hash',saved)
+
     def test_state_no_overwrite(self):
-        with self.assertRaises(FileExistsError): Store.initialize(self.store.path,'another-strong-password')
+        with self.assertRaises(FileExistsError):Store.initialize(self.store.path)
+
 
 if __name__ == '__main__': unittest.main()

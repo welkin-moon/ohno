@@ -22,12 +22,18 @@ from school_installer import build_school_installer
 setup=root/'ohno-setup.exe'
 target=root/'test-target.exe'
 ctx=ssl._create_unverified_context()
-password='ci-test-password-only'
+pin='2468'
 
 
 def call(method,path,body=None,headers=None):
     conn=http.client.HTTPSConnection('localhost',8443,context=ctx,timeout=5)
     conn.request(method,path,body,headers or {});r=conn.getresponse();result=(r.status,dict(r.getheaders()),r.read().decode());conn.close();return result
+
+
+def control_call(method,path,body=None,headers=None):
+    conn=http.client.HTTPConnection('127.0.0.1',8765,timeout=5)
+    hdrs=dict(headers or {});hdrs.setdefault('Host','127.0.0.1')
+    conn.request(method,path,body,hdrs);r=conn.getresponse();result=(r.status,dict(r.getheaders()),r.read().decode());conn.close();return result
 
 
 def waitfor(fn,seconds=90):
@@ -41,8 +47,8 @@ def waitfor(fn,seconds=90):
     raise RuntimeError('timed out: '+str(last))
 
 
-def form(path,values,cookie):
-    status,_,text=call('POST',path,urlencode(values),{'Cookie':cookie})
+def form(path,values):
+    status,_,text=control_call('POST',path,urlencode(values))
     if status!=303:raise RuntimeError('request rejected: '+str(status)+' '+text)
 
 
@@ -54,7 +60,7 @@ def main():
         openssl=shutil.which('openssl') or r'C:\Program Files\Git\usr\bin\openssl.exe'
         subprocess.run([openssl,'req','-x509','-newkey','rsa:2048','-sha256','-nodes','-days','1','-keyout',str(key),'-out',str(cert),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:TRUE'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest().upper()
-        Store.initialize(state,password)
+        Store.initialize(state)
         try:
             server=subprocess.Popen([sys.executable,str(root/'teacher/server.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
             waitfor(lambda:call('GET','/health')[0]==200,15)
@@ -70,18 +76,18 @@ def main():
             if first_mac not in read()['devices'][device]['macs']: raise RuntimeError('inconsistent MAC inventory')
             adapter=subprocess.run(['powershell','-NoProfile','-Command',"if (Get-NetAdapter -Name 'ohno-tun' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"])
             if adapter.returncode:raise RuntimeError('TUN adapter not found')
-            status,headers,_=call('POST','/login',urlencode({'password':password}));assert status==303
-            cookie=headers['Set-Cookie'].split(';')[0]
-            status,_,page=call('GET','/',headers={'Cookie':cookie});assert status==200
+            status,_,page=control_call('GET','/');assert status==200
+            if 'action="/login"' in page or 'name="password"' in page: raise RuntimeError('teacher control unexpectedly exposes a login form')
             csrf=re.search(r'name="csrf" value="([^"]+)',page).group(1)
-            form('/device',{'csrf':csrf,'id':device,'approved':'1'},cookie)
+            form('/unlock-pin',{'csrf':csrf,'action':'set','pin':pin})
+            form('/device',{'csrf':csrf,'id':device,'approved':'1'})
             if read()['devices'][device]['bound_mac']!=first_mac: raise RuntimeError('device MAC was not bound')
             file_hash=hashlib.sha256(target.read_bytes()).hexdigest()
-            form('/policy',{'csrf':csrf,'domains':'game.example','hashes':file_hash,'names':''},cookie)
+            form('/policy',{'csrf':csrf,'domains':'game.example','hashes':file_hash,'names':''})
             child=subprocess.Popen([str(target)])
             waitfor(lambda:child.poll() is not None,120)
             request=waitfor(lambda:next((x for x in read()['requests'] if x['object']==file_hash),None),90)
-            form('/request',{'csrf':csrf,'id':request['id'],'action':'approve'},cookie)
+            form('/request',{'csrf':csrf,'id':request['id'],'action':'approve'})
             time.sleep(25) # allow the service to fetch the temporary grant
             child=subprocess.Popen([str(target)])
             time.sleep(20)
@@ -89,7 +95,7 @@ def main():
             child.terminate();child.wait(timeout=5);child=None
             subprocess.run([str(root/'pipe-client.exe'),'W:game.example'],check=True)
             website=waitfor(lambda:next((x for x in read()['requests'] if x['kind']=='website' and x['object']=='game.example'),None),90)
-            form('/request',{'csrf':csrf,'id':website['id'],'action':'approve'},cookie)
+            form('/request',{'csrf':csrf,'id':website['id'],'action':'approve'})
             def allowed_site():
                 path=r'SOFTWARE\Policies\Microsoft\Edge\URLAllowlist'
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
@@ -105,12 +111,12 @@ def main():
             net_request=waitfor(lambda:next((x for x in read()['requests'] if x['kind']=='network' and x['object']==net_hash),None),80)
             if child.wait(timeout=75)==0:raise RuntimeError('untrusted executable connected despite WFP rule')
             child=None
-            form('/request',{'csrf':csrf,'id':net_request['id'],'action':'approve'},cookie)
+            form('/request',{'csrf':csrf,'id':net_request['id'],'action':'approve'})
             def allowed_connect():
                 result=subprocess.run([str(network_target),port],timeout=8)
                 return result.returncode==0
             waitfor(allowed_connect,90)
-            subprocess.run([str(root/'pipe-client.exe'),'U:'+password],check=True)
+            subprocess.run([str(root/'pipe-client.exe'),'U:'+pin],check=True)
             waitfor(lambda:any(x['kind']=='pause' and x['device_id']==device for x in read()['requests']),30)
             # The next policy refresh removes the managed domain block while paused.
             def website_unblocked():
@@ -118,7 +124,7 @@ def main():
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
                     return all(winreg.EnumValue(registry,i)[1]!='game.example' for i in range(winreg.QueryInfoKey(registry)[1]))
             waitfor(website_unblocked,90)
-            print('Windows service-to-teacher application, website, network and password-unlock tests passed')
+            print('Windows service-to-teacher application, website, network and PIN-unlock tests passed')
         finally:
             cleanup_failed=False
             if child and child.poll() is None:child.terminate();child.wait(timeout=5)
