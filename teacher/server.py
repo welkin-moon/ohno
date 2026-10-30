@@ -548,7 +548,7 @@ def main():
     p = argparse.ArgumentParser(description='ohno teacher HTTPS service')
     p.add_argument('--state', help='Path to private writable state file')
     p.add_argument('--control-port', type=int, default=8765, help='Loopback-only teacher UI port')
-    p.add_argument('--init', action='store_true', help='Create state and teacher password interactively')
+    p.add_argument('--init', action='store_true', help='Create empty teacher state')
     p.add_argument('--generate-certificate', action='store_true', help='Generate a local HTTPS certificate')
     p.add_argument('--host', help='Hostname or IP for certificate')
     p.add_argument('--cert', help='PEM certificate')
