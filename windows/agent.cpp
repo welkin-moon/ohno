@@ -181,7 +181,7 @@ void run_agent(HANDLE stop_event){
             auto server=get_server();if(server.empty())return "unavailable";auto ident=get_identity();
             auto headers=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\nContent-Type: application/json\r\n";
             bool unlock=payload.rfind("U:",0)==0;
-            secret_text body;body.value=unlock?"{\"password\":"+quoted(payload.substr(2))+"}":"{\"kind\":\"website\",\"object\":"+quoted(payload.substr(2))+"}";
+            secret_text body;body.value=unlock?"{\"pin\":"+quoted(payload.substr(2))+"}":"{\"kind\":\"website\",\"object\":"+quoted(payload.substr(2))+"}";
             auto r=request(server,L"POST",unlock?L"/api/device/unlock":L"/api/device/request",headers,body.value);
             return r.status==201?"accepted":r.status==403?"denied":"unavailable";
         }catch(const std::exception&){return "unavailable";}
