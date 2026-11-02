@@ -15,14 +15,14 @@ NetworkFilter::NetworkFilter(){
 }
 NetworkFilter::~NetworkFilter(){if(engine_)FwpmEngineClose0(engine_);}
 bool NetworkFilter::add(const std::wstring& path,Item& item){
-    FWP_BYTE_BLOB* id=nullptr;if(FwpmGetAppIdFromFileName0(path.c_str(),&id)!=ERROR_SUCCESS)return false;
+    FWP_BYTE_BLOB* id=nullptr;if(FwpmGetAppIdFromFileName0(path.c_str(),&id)!=ERROR_SUCCESS){cycle_ok_=false;return false;}
     FWPM_FILTER_CONDITION0 condition{};condition.fieldKey=FWPM_CONDITION_ALE_APP_ID;condition.matchType=FWP_MATCH_EQUAL;condition.conditionValue.type=FWP_BYTE_BLOB_TYPE;condition.conditionValue.byteBlob=id;
     FWPM_FILTER0 f{};f.displayData.name=const_cast<wchar_t*>(L"ohno untrusted application outbound");f.subLayerKey=sublayer_;f.weight.type=FWP_EMPTY;f.action.type=FWP_ACTION_BLOCK;f.numFilterConditions=1;f.filterCondition=&condition;
     f.layerKey=FWPM_LAYER_ALE_AUTH_CONNECT_V4;DWORD result=FwpmFilterAdd0(engine_,&f,nullptr,&item.v4);
     if(result==ERROR_SUCCESS){f.layerKey=FWPM_LAYER_ALE_AUTH_CONNECT_V6;result=FwpmFilterAdd0(engine_,&f,nullptr,&item.v6);if(result!=ERROR_SUCCESS)FwpmFilterDeleteById0(engine_,item.v4);}
-    FwpmFreeMemory0(reinterpret_cast<void**>(&id));item.blocked=result==ERROR_SUCCESS;return item.blocked;
+    FwpmFreeMemory0(reinterpret_cast<void**>(&id));item.blocked=result==ERROR_SUCCESS;if(!item.blocked)cycle_ok_=false;return item.blocked;
 }
-void NetworkFilter::remove(Item& item){if(item.blocked){FwpmFilterDeleteById0(engine_,item.v4);FwpmFilterDeleteById0(engine_,item.v6);item.blocked=false;}}
+void NetworkFilter::remove(Item& item){if(item.blocked){const auto v4=FwpmFilterDeleteById0(engine_,item.v4),v6=FwpmFilterDeleteById0(engine_,item.v6);if(v4!=ERROR_SUCCESS||v6!=ERROR_SUCCESS)cycle_ok_=false;item.blocked=false;}}
 bool NetworkFilter::granted(const Item& item) const{return std::find(allowed_.begin(),allowed_.end(),item.hash)!=allowed_.end();}
 bool NetworkFilter::register_untrusted(const std::wstring& path,const std::string& hash){
     if(!engine_||paused_)return false;

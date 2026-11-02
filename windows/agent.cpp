@@ -13,6 +13,7 @@
 #include <vector>
 #include <stdexcept>
 #include "agent.hpp"
+#include "../src/agent_health.hpp"
 #include "monitor.hpp"
 #include "browser_policy.hpp"
 #include "network_filter.hpp"
@@ -174,7 +175,7 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
     return out;
 }
 }
-void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle){
+void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool trial){
     auto on_request=[](const std::string& payload)->std::string{
         try{
             auto server=get_server();if(server.empty())return "unavailable";auto ident=get_identity();
@@ -204,6 +205,7 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle){
     std::map<std::string,ULONGLONG> last_request;
     ohno::ApprovalQueue queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
+        network.begin_cycle();
         bool tun_ok=tun.ensure(tun_blocked,tun_allowed);
         bool cycle_ok=tun_ok&&network.available();
         try{
@@ -269,7 +271,7 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle){
                 });
             }
             // Offline cached policy is valid health; SCM RUNNING alone is not.
-            if(cycle_ok&&website_requests.available()&&healthy_cycle&&WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT)healthy_cycle();
+            if(ohno::agent_cycle_healthy(trial,!policy_text.empty(),cycle_ok,website_requests.available(),network.cycle_healthy())&&healthy_cycle&&WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT)healthy_cycle();
         }catch(const std::exception&){debug(L"ohno: service iteration failed\n");}
         if(WaitForSingleObject(stop_event,15000)!=WAIT_TIMEOUT)break;
     }

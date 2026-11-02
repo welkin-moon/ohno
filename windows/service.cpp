@@ -49,6 +49,7 @@ void WINAPI service_main(DWORD, LPWSTR*) {
         else if(layout==0)run_agent(stop_event); // existing installation, no automatic trust/layout upgrade
         else throw std::runtime_error("unsupported installation layout");
     }catch(...){OutputDebugStringW(L"ohno: worker/update host failed; standard service recovery remains available\n");result=ERROR_SERVICE_SPECIFIC_ERROR;}
+    if(WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0)result=NO_ERROR; // STOP must never invoke error recovery
     CloseHandle(stop_event);
     stop_event = nullptr;
     report(SERVICE_STOPPED,result);

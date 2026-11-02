@@ -55,11 +55,11 @@ def main():
                 directory.mkdir(exist_ok=True)
                 value={'root':str(directory),'initialize':initialize,'baseline':str(baseline),'server':server.origin,
                     'certificate':(root/'cert.pem').read_text(),'public_key':public,'device_id':DEVICE,'device_key':KEY,
-                    'stop_ms':1500,'crash':0,'stop_at':0}
+                    'stop_ms':20000,'crash':0,'stop_at':0,'fail_drain':False,'stop_after_poll':True,'stop_after_rollback':False}
                 value.update(overrides);return value
             def run(directory,expected=0,**overrides):
                 result=subprocess.run([client],input=json.dumps(config(directory,**overrides)),text=True,capture_output=True,timeout=30)
-                assert result.returncode==expected,(directory.name,result.returncode,result.stderr)
+                assert result.returncode==expected,(directory.name,result.returncode,result.stderr,events(directory),server.requests[-3:])
                 return json.loads((directory/'update-state.json').read_text())
             def events(directory):
                 path=directory/'worker-events.log';return path.read_text().splitlines() if path.exists() else []
@@ -69,38 +69,41 @@ def main():
                 while any(alive(pid) for pid in pids) and time.monotonic()<deadline:time.sleep(.05)
                 assert not any(alive(pid) for pid in pids),(directory.name,'orphan process',pids)
             def state_is(value,sequence,floor):
-                assert value['phase']=='stable' and value['active']['sequence']==sequence and value['high_water']==floor,value
+                assert value['phase']=='stable' and value['active']['sequence']==sequence and value['high_water']==floor,(value,server.requests[-3:])
             offer();directory=root/'success';state_is(run(directory),7,7)
             assert sum(' start 7 ' in line for line in events(directory))==1;stopped(directory)
             # Restart executes committed bytes offline, without an expired offer
             # or maintenance password. No additional enrollment/settings path.
-            server.mode='no_offer';state_is(run(directory,initialize=False,stop_ms=500),7,7);stopped(directory)
+            server.mode='no_offer';state_is(run(directory,initialize=False,stop_ms=20000),7,7);stopped(directory)
             for mode in ['revoked','wrong_nonce','wrong_hash','wrong_device','wrong_sequence','expired','bad_signature','tampered']:
-                offer(mode=mode);directory=root/mode;state_is(run(directory,stop_ms=600),0,0)
+                offer(mode=mode);directory=root/mode;state_is(run(directory,stop_ms=20000),0,0)
                 assert not any(' start 7 ' in line for line in events(directory));stopped(directory)
-            offer();directory=root/'wrong-cert';state_is(run(directory,certificate=(root/'other.pem').read_text(),stop_ms=500),0,0);stopped(directory)
+            offer();directory=root/'wrong-cert';state_is(run(directory,certificate=(root/'other.pem').read_text(),stop_ms=20000),0,0);stopped(directory)
             for bad in ['exit','nohealth','nonce','revision','zero','malformed','oversize']:
-                offer('0.2.0-'+bad);directory=root/('bad-'+bad);state_is(run(directory,stop_ms=1800),0,7)
+                offer('0.2.0-'+bad);directory=root/('bad-'+bad);state_is(run(directory,stop_ms=20000,stop_after_poll=False,stop_after_rollback=True),0,7)
                 log=events(directory);assert sum(' start 7 ' in line for line in log)==1,log
                 assert sum(' start 0 ' in line for line in log)>=2,log;stopped(directory)
-            for point in [4,5,6,7]:
+            for point in [4,5,6,7,10,11,12]:
                 offer();directory=root/('stop-'+str(point));state_is(run(directory,stop_at=point),0,7)
                 assert sum(' start 0 ' in line for line in events(directory))==1;stopped(directory)
-            for point in [4,5,6,7,8,9]:
+            for point in [4,5,6,7,8,9,10,11,12]:
                 offer('0.2.0-nohealth' if point==9 else '0.2.0-descendant');directory=root/('crash-'+str(point))
-                run(directory,expected=100+point,crash=point,stop_ms=10000);stopped(directory)
-                server.mode='no_offer';state_is(run(directory,initialize=False,stop_ms=600),7 if point==8 else 0,7);stopped(directory)
+                run(directory,expected=100+point,crash=point,stop_ms=20000);stopped(directory)
+                server.mode='no_offer';state_is(run(directory,initialize=False,stop_ms=20000),7 if point==8 else 0,7);stopped(directory)
+            offer();directory=root/'drain-unconfirmed';value=run(directory,expected=1,fail_drain=True)
+            assert value['phase']=='prepared' and value['high_water']==7,value
+            assert not any(' start 7 ' in line for line in events(directory));stopped(directory)
             # Journal corruption never resets identity/floor or launches fallback.
             offer();directory=root/'corrupt';state_is(run(directory),7,7);before=len(events(directory))
             (directory/'update-state.json').write_text('{truncated')
             result=subprocess.run([client],input=json.dumps(config(directory,initialize=False)),text=True,capture_output=True,timeout=20)
             assert result.returncode==1 and len(events(directory))==before
             # Standard keepalive restarts only its own worker, no teacher prompt.
-            baseline.write_bytes(package('0.1.0-restart'));offer(mode='no_offer');directory=root/'keepalive';state_is(run(directory,stop_ms=700),0,0)
+            baseline.write_bytes(package('0.1.0-restart'));offer(mode='no_offer');directory=root/'keepalive';state_is(run(directory,stop_ms=20000),0,0)
             assert sum(' start 0 ' in line for line in events(directory))==2;stopped(directory)
             # Kill the console host while its worker and grandchild are alive:
             # closing the job through process death must reap both, not persist.
-            baseline.write_bytes(package('0.1.0-descendant'));directory=root/'host-killed';value=config(directory,stop_ms=15000)
+            baseline.write_bytes(package('0.1.0-descendant'));directory=root/'host-killed';value=config(directory,stop_ms=20000,stop_after_poll=False)
             process=subprocess.Popen([client],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             process.stdin.write(json.dumps(value)+'\n');process.stdin.flush();process.stdin.close()
             deadline=time.monotonic()+8
@@ -112,7 +115,7 @@ def main():
             result=subprocess.run([client],input=json.dumps(value),text=True,capture_output=True,timeout=20)
             assert result.returncode==1 and not events(directory)
             server.shutdown();thread.join()
-    print('Native runtime: healthy update, private proof refusals, rollback/replay, STOP, 6 crashes, offline restart, keepalive and job cleanup passed')
+    print('Native runtime: healthy update, private proof refusals, rollback/replay, STOP, 9 crashes, offline restart, keepalive and job cleanup passed')
 
 
 if __name__=='__main__':main()

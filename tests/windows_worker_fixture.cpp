@@ -10,7 +10,7 @@ void log(const std::string& event){HANDLE f=CreateFileW(L"..\\..\\worker-events.
     if(f==INVALID_HANDLE_VALUE)return;const auto line=std::to_string(GetCurrentProcessId())+" "+event+"\n";DWORD n=0;WriteFile(f,line.data(),static_cast<DWORD>(line.size()),&n,nullptr);FlushFileBuffers(f);CloseHandle(f);}
 int wmain(int argc,wchar_t** argv){
     if(argc==2&&!std::wcscmp(argv[1],L"--descendant")){log("descendant");Sleep(INFINITE);return 0;}
-    if(argc!=8||std::wcscmp(argv[1],L"--worker"))return 2;
+    if(argc!=9||std::wcscmp(argv[1],L"--worker"))return 2;
     HANDLE stop=reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::wcstoull(argv[2],nullptr,10))),
         pipe=reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::wcstoull(argv[3],nullptr,10)));
     ohno::UpdateHealth proof{narrow(argv[4]),{std::wcstoull(argv[5],nullptr,10),narrow(argv[6]),narrow(argv[7])},1};

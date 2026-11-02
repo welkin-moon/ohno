@@ -15,14 +15,15 @@ bool system_token(){HANDLE token=nullptr;if(!OpenProcessToken(GetCurrentProcess(
 }
 int wmain(int argc,wchar_t** argv){
     try{
-        if(argc!=8||std::wcscmp(argv[1],L"--worker")||!system_token())return 2;
+        if(argc!=9||std::wcscmp(argv[1],L"--worker")||!system_token())return 2;
         HANDLE stop=reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(number(argv[2]))),
             pipe=reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(number(argv[3])));
         DWORD flags=0;if(!GetHandleInformation(stop,&flags)||!(flags&HANDLE_FLAG_INHERIT)||
             !GetHandleInformation(pipe,&flags)||!(flags&HANDLE_FLAG_INHERIT)||GetFileType(pipe)!=FILE_TYPE_PIPE)return 2;
         ohno::UpdateHealth proof{ascii(argv[4]),{number(argv[5]),ascii(argv[6]),ascii(argv[7])},1};
+        const bool trial=std::wcscmp(argv[8],L"trial")==0;if(!trial&&std::wcscmp(argv[8],L"stable"))return 2;
         const auto document=ohno::serialize_update_health(proof);bool sent=false;
-        run_agent(stop,[&]{if(!sent){DWORD written=0;sent=WriteFile(pipe,document.data(),static_cast<DWORD>(document.size()),&written,nullptr)&&written==document.size();if(sent){CloseHandle(pipe);pipe=nullptr;}}});
+        run_agent(stop,[&]{if(!sent){DWORD written=0;sent=WriteFile(pipe,document.data(),static_cast<DWORD>(document.size()),&written,nullptr)&&written==document.size();if(sent){CloseHandle(pipe);pipe=nullptr;}}},trial);
         if(pipe)CloseHandle(pipe);CloseHandle(stop);return 0;
     }catch(...){return 1;}
 }

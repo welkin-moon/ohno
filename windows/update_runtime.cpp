@@ -26,6 +26,7 @@ void run_update_runtime(const std::wstring& root,const std::string& key,HANDLE s
     auto persist=[&](const UpdateJournal& next){persist_update_transition(storage,state,next);state=next;};
     if(state.phase!=UpdatePhase::Stable){persist(recover_update(state));checkpoint(options,1);}
     std::unique_ptr<WorkerProcess> worker;
+    auto drain=[&]{if(worker&&!worker->stop())throw std::runtime_error("worker tree did not drain; no next version may start");worker.reset();};
     auto launch=[&](const UpdateRevision& revision,const std::string& transaction){
         worker=std::make_unique<WorkerProcess>(storage,revision,key,transaction,stop);
         UpdateHealth proof;return worker->healthy(stop,options.health_timeout_ms,proof);
@@ -33,11 +34,11 @@ void run_update_runtime(const std::wstring& root,const std::string& key,HANDLE s
     unsigned restarts=0;ULONGLONG restart_window=GetTickCount64(),next_poll=0;
     while(!stopping(stop)){
         if(!worker||!worker->running()){
-            worker.reset();
+            drain();
             if(GetTickCount64()-restart_window>60000){restarts=0;restart_window=GetTickCount64();}
             if(++restarts>3)throw std::runtime_error("worker repeatedly failed; standard service recovery required");
             bool healthy=false;try{healthy=launch(state.active,nonce());}catch(...){if(stopping(stop))break;throw;}
-            if(!healthy){worker.reset();if(WaitForSingleObject(stop,options.restart_delay_ms)!=WAIT_TIMEOUT)break;continue;}
+            if(!healthy){drain();if(WaitForSingleObject(stop,options.restart_delay_ms)!=WAIT_TIMEOUT)break;continue;}
             checkpoint(options,2);next_poll=0;
         }
         if(stopping(stop))break;
@@ -61,7 +62,7 @@ void run_update_runtime(const std::wstring& root,const std::string& key,HANDLE s
                 // Fresh authorization immediately precedes durable prepare. Do
                 // not wrap persistence in a retry: uncertain writes must exit.
                 persist(prepare_update(state,offered->revision,nonce()));checkpoint(options,4);
-                worker.reset(); // old worker and its TUN are gone before switch
+                drain(); // old worker and its TUN are gone before switch
                 if(stopping(stop)){persist(rollback_update(state));break;}
                 persist(activate_update(state,state.transaction));checkpoint(options,5);
                 bool healthy=false;UpdateHealth proof;
@@ -71,20 +72,21 @@ void run_update_runtime(const std::wstring& root,const std::string& key,HANDLE s
                 }catch(...){healthy=false;}
                 if(healthy&&!stopping(stop)){
                     checkpoint(options,7);
-                    if(stopping(stop)){worker.reset();persist(rollback_update(state));break;}
+                    if(stopping(stop)){drain();persist(rollback_update(state));break;}
                     persist(commit_update_health(state,proof));checkpoint(options,8);
                     restarts=0;restart_window=GetTickCount64();
                 }else{
-                    worker.reset();persist(rollback_update(state));checkpoint(options,9);
+                    drain();persist(rollback_update(state));checkpoint(options,9);
                     // Rollback retains high-water. No repeated bad build or
                     // old-worker restart if STOP/uninstall is already pending.
                 }
             }
+            checkpoint(options,14);
         }
         if(!worker)continue;
         if(WaitForSingleObject(stop,100)!=WAIT_TIMEOUT)break;
     }
-    worker.reset();
+    drain();
     if(state.phase!=UpdatePhase::Stable)persist(rollback_update(state));
 }
 }

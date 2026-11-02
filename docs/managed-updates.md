@@ -137,7 +137,7 @@ published installers are not retroactively migrated by this source change.
 The SCM host owns one worker process tree. It verifies retained package/signature
 and every extracted file before starting the fixed `ohno-worker.exe`, uses an
 explicit executable path (no shell), and inherits only a private stop event and
-health-pipe writer. A non-inherited kill-on-close job owns workers and descendants;
+health-pipe writer. A non-inherited kill-on-close job is assigned atomically at CreateProcess via the Windows 10 JOB_LIST attribute and owns workers and descendants;
 normal service STOP and uninstall win, and host death cannot leave an independent
 watchdog/TUN tree. This uses standard Windows [handle lists](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
 and [nested jobs](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs),
@@ -146,11 +146,11 @@ not a second persistent service or protection against OS administrators.
 Startup durably rolls back any incomplete transaction before launch. New builds
 stage while the old worker runs, then obtain a fresh online decision before
 prepare. Its in-memory launch budget is capped at 20 seconds, never persisted as
-a bearer token. Old worker shutdown precedes durable probation and candidate
-launch. Health is a bounded strict document over the inherited private pipe,
+a bearer token. Old worker shutdown and confirmed whole-job drain precede durable probation and candidate
+launch; a bounded drain failure exits the host instead of launching another version. Health is a bounded strict document over the inherited private pipe,
 bound to the random transaction and actual launched sequence/version/hash. The
 production worker reports only after a completed local policy cycle with its
-request pipe, TUN and WFP available; offline cached policy is allowed. Mere SCM
+request pipe, TUN and WFP operations successful; offline cached policy is allowed. A trial candidate must have applied a valid policy; stable baseline startup may still be awaiting initial/clone device approval. Mere SCM
 RUNNING, a responding teacher, or a public pipe is not a health proof.
 
 Only durable health commit changes last-good. Timeout, exit, malformed/mismatched
@@ -163,6 +163,6 @@ clone identity regeneration runs first. No maintenance password is used here.
 
 Windows CI executes only compiled fixture workers in temporary directories for
 this slice, including health refusals, current approval revocation, rollback,
-replay, stop-at-boundary, six real host process crashes, offline committed launch,
+replay, stop-at-boundary, nine real host process crashes (including atomic creation/pre-resume boundaries), offline committed launch,
 worker keepalive and killing the host with a live descendant. Actual production
 worker/installer/service update acceptance remains the next integration test.

@@ -1,10 +1,17 @@
 #include "update_health.hpp"
+#include "agent_health.hpp"
 #include <cassert>
 #include <functional>
 #include <iostream>
 using namespace ohno;
 void rejects(const std::function<void()>& fn){bool bad=false;try{fn();}catch(...){bad=true;}assert(bad);}
 int main(){
+    assert(agent_cycle_healthy(false,false,true,true,true)); // clone/enrollment baseline
+    assert(!agent_cycle_healthy(true,false,true,true,true)); // no candidate policy
+    assert(agent_cycle_healthy(true,true,true,true,true)); // offline cache valid
+    assert(!agent_cycle_healthy(true,true,false,true,true));
+    assert(!agent_cycle_healthy(true,true,true,false,true));
+    assert(!agent_cycle_healthy(true,true,true,true,false)); // WFP API failed
     UpdateHealth proof{std::string(64,'a'),{7,"0.2.0",std::string(64,'b')},1};
     const auto document=serialize_update_health(proof);const auto parsed=parse_update_health(document);
     assert(parsed.transaction==proof.transaction&&parsed.revision==proof.revision&&parsed.successful_agent_cycles==1);

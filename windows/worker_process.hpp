@@ -5,6 +5,9 @@
 #include "update_payload.hpp"
 #include "../src/update_health.hpp"
 namespace ohno {
+#ifdef OHNO_UPDATE_IO_TESTING
+void set_worker_test_hooks(void(*hook)(unsigned,DWORD),bool fail_drain=false);
+#endif
 // One child process tree, owned by a kill-on-close job. Only its stop event and
 // health pipe writer are inherited. No shell, shared named health pipe or secret
 // command-line arguments. A normal host stop terminates ownership, not restarts.
@@ -18,6 +21,7 @@ public:
     WorkerProcess& operator=(const WorkerProcess&)=delete;
     bool healthy(HANDLE host_stop,DWORD timeout_ms,UpdateHealth& proof);
     bool running() const;
-    void stop() noexcept;
+    // True only after the entire owned job has no active processes.
+    bool stop() noexcept;
 };
 }
