@@ -21,8 +21,9 @@ from server import Store
 from school_installer import build_school_installer
 setup=root/'ohno-setup.exe'
 target=root/'test-target.exe'
-ctx=ssl._create_unverified_context()
+ctx=None
 pin='2468'
+maintenance_password='CI fixture classroom maintenance passphrase'
 
 
 def call(method,path,body=None,headers=None):
@@ -52,7 +53,22 @@ def form(path,values):
     if status!=303:raise RuntimeError('request rejected: '+str(status)+' '+text)
 
 
+def assert_removed(thumb):
+    for path in [r'SOFTWARE\Ohno',r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype']:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path):
+                raise RuntimeError('installer registry state remains after removal')
+        except FileNotFoundError:pass
+    if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:
+        raise RuntimeError('service remains after removal')
+    if (Path(os.environ['ProgramFiles'])/'OhnoPrototype').exists():
+        raise RuntimeError('installer program directory remains after removal')
+    if subprocess.run(['certutil','-store','Root',thumb],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:
+        raise RuntimeError('fixture root remains after removal')
+
+
 def main():
+    global ctx
     server=None;child=None;listener=None;stream=None;installed=False;root_installed=False
     with tempfile.TemporaryDirectory() as temp:
         state=Path(temp)/'state.json'
@@ -60,7 +76,8 @@ def main():
         openssl=shutil.which('openssl') or r'C:\Program Files\Git\usr\bin\openssl.exe'
         subprocess.run([openssl,'req','-x509','-newkey','rsa:2048','-sha256','-nodes','-days','1','-keyout',str(key),'-out',str(cert),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:TRUE'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest().upper()
-        Store.initialize(state)
+        ctx=ssl.create_default_context(cafile=str(cert))
+        Store.initialize(state).set_maintenance_password(maintenance_password)
         try:
             server=subprocess.Popen([sys.executable,str(root/'teacher/server.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
             waitfor(lambda:call('GET','/health')[0]==200,15)
@@ -68,7 +85,15 @@ def main():
             # without a message box on the headless CI runner.
             school_setup=Path(temp)/'Ohno-School-Setup.exe'
             school_setup.write_bytes(build_school_installer(setup.read_bytes(),'https://localhost:8443',cert.read_bytes()))
-            subprocess.run([str(school_setup),'--install-bundled'],check=True);installed=True;root_installed=True
+            rejected=subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
+                                    input='wrong classroom maintenance passphrase\n',text=True,timeout=30)
+            if rejected.returncode==0:raise RuntimeError('incorrect password installed service')
+            if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:raise RuntimeError('denied install changed service state')
+            subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
+                           input=maintenance_password+'\n',text=True,check=True,timeout=30);installed=True;root_installed=True
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype') as uninstall:
+                command=winreg.QueryValueEx(uninstall,'UninstallString')[0]
+                if 'ohno-maintenance.exe' not in command or not command.endswith(' --remove'):raise RuntimeError('normal Windows uninstall entry missing')
             def read():return json.loads(state.read_text('utf-8'))
             device=waitfor(lambda:next(iter(read()['devices']),None),90)
             waitfor(lambda:read()['devices'][device].get('tun') is True,90)
@@ -124,7 +149,38 @@ def main():
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
                     return all(winreg.EnumValue(registry,i)[1]!='game.example' for i in range(winreg.QueryInfoKey(registry)[1]))
             waitfor(website_unblocked,90)
-            print('Windows service-to-teacher application, website, network and PIN-unlock tests passed')
+            # Revoked maintenance authority must not stop or remove the service.
+            form('/maintenance-password',{'csrf':csrf,'action':'clear'})
+            denied=subprocess.run([str(setup),'--remove','--password-stdin'],
+                                  input=maintenance_password+'\n',text=True,timeout=30)
+            if denied.returncode==0:raise RuntimeError('disabled maintenance password removed service')
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SYSTEM\CurrentControlSet\Services\OhnoPrototype'):
+                pass
+            form('/maintenance-password',{'csrf':csrf,'action':'set','maintenance_password':maintenance_password})
+            # Device revocation is not a trap preventing authorized removal.
+            form('/device',{'csrf':csrf,'id':device,'approved':'0'})
+            # Exercise normal removal on a revoked device, then a fresh install
+            # and explicit offline OS-administrator recovery. All fixture state
+            # belongs to this ephemeral runner; no production instance is used.
+            subprocess.run([str(setup),'--remove','--password-stdin'],
+                           input=maintenance_password+'\n',text=True,check=True,timeout=35)
+            installed=False
+            assert_removed(thumb)
+            previous_devices=set(read()['devices'])
+            subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
+                           input=maintenance_password+'\n',text=True,check=True,timeout=35)
+            installed=True
+            waitfor(lambda:set(read()['devices'])-previous_devices,90)
+            server.terminate();server.wait(timeout=10);server=None
+            offline=subprocess.run([str(setup),'--remove','--password-stdin'],
+                                   input=maintenance_password+'\n',text=True,timeout=35)
+            if offline.returncode==0:raise RuntimeError('offline normal removal unexpectedly authorized')
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SYSTEM\CurrentControlSet\Services\OhnoPrototype'):
+                pass
+            subprocess.run([str(setup),'--admin-recovery-remove'],check=True,timeout=35)
+            installed=False
+            assert_removed(thumb)
+            print('Windows authorized setup/removal, offline admin recovery, service, rules, PIN and revocation tests passed')
         finally:
             cleanup_failed=False
             if child and child.poll() is None:child.terminate();child.wait(timeout=5)
@@ -133,8 +189,17 @@ def main():
                 try:Path(stream).unlink()
                 except FileNotFoundError:pass
             if installed:
-                result=subprocess.run([str(setup),'--remove'])
-                if result.returncode:cleanup_failed=True
+                result=subprocess.run([str(setup),'--remove','--password-stdin'],
+                                      input=maintenance_password+'\n',text=True,timeout=35)
+                if result.returncode:
+                    cleanup_failed=True
+                    # Explicit OS-admin recovery cleans the ephemeral runner only;
+                    # never hide the failed normal removal assertion.
+                    subprocess.run([str(setup),'--admin-recovery-remove'],timeout=35)
+                for path in [r'SOFTWARE\Ohno',r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype']:
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path):cleanup_failed=True
+                    except FileNotFoundError:pass
                 if subprocess.run(['certutil','-store','Root',thumb],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:cleanup_failed=True
             if server:
                 server.terminate();server.wait(timeout=10)

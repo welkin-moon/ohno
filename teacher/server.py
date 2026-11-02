@@ -432,11 +432,11 @@ class Handler(BaseHTTPRequestHandler):
                 action = '<form method="post" action="/request">' + hidden + '<input type="hidden" name="id" value="' + esc(item['id']) + '"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>'
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>仅本机可管理 · 策略版本 ' + str(revision) + '</p>'
-        content += '<section><h2>教师维护密码（客户端接入开发中）</h2><p>仅用于新增安装 / 卸载授权，不是后台登录或课堂 PIN。镜像分发后的启动不重复输入。支持一句话式长口令，不要求大小写或符号组合。当前：<strong>' + ('已设置' if maintenance_enabled else '未设置，维护授权拒绝') + '</strong></p><p><small>当前安装器还未接入，设置此密码暂不会保护现有 alpha.6 安装 / 卸载。系统管理员仍可进行标准 Windows 恢复。</small></p><form method="post" action="/maintenance-password">' + hidden + '<input name="maintenance_password" type="password" aria-label="教师维护密码" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12–128 字符的维护密码"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear" formnovalidate>停用维护授权</button></form></section>'
+        content += '<section><h2>教师维护密码（安装 / 卸载）</h2><p>仅用于新增安装 / 卸载授权，不是后台登录或课堂 PIN。镜像分发后的启动不重复输入。支持一句话式长口令，不要求大小写或符号组合。当前：<strong>' + ('已设置' if maintenance_enabled else '未设置，维护授权拒绝') + '</strong></p><p><small>配套新版安装器在安装 / 卸载时在线验证此密码；已发布的 alpha.6 旧安装器不具备此保护。系统管理员仍可进行标准 Windows 恢复。</small></p><form method="post" action="/maintenance-password">' + hidden + '<input name="maintenance_password" type="password" aria-label="教师维护密码" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12–128 字符的维护密码"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear" formnovalidate>停用维护授权</button></form></section>'
         content += '<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；后台管理仅在教师机本地开放并免登录。当前：<strong>' + ('已启用' if pin_enabled else '关闭') + '</strong></p><form method="post" action="/unlock-pin">' + hidden + '<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>'
         content += '<section><h2>网站与程序规则</h2><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件</label></p><button>保存规则</button></form></section>'
         if getattr(self.server, 'school_installer_exe', None) and getattr(self.server, 'enrollment_origin', None):
-            content += '<section><h2>学生机一键安装</h2><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a>；复制到模板机双击、允许 UAC 即可。</p><small>包内只有教师 API 地址和公开证书，没有教师 PIN、密码或私钥。</small></section>'
+            content += '<section><h2>学生机一键安装</h2><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a>；复制到模板机双击、允许 UAC，再输入教师维护密码。镜像分发后不重复输入。</p><small>包内只有教师 API 地址和公开证书，没有教师 PIN、密码或私钥。</small></section>'
         content += '<section><h2>设备</h2><p><small>MAC 用于设备关联；DHCP IP 仅显示最近地址。真正认证仍使用每机独立密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>MAC</th><th>最近 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         return self.page('ohno 教师端', content)
@@ -540,13 +540,17 @@ class Handler(BaseHTTPRequestHandler):
         # This response is a nonce-bound online decision, not a bearer token.
         # New installers must verify TLS, compare action/nonce/device/expiry and
         # use it immediately; existing clients do not call this endpoint yet.
-        if (set(data) != {'action', 'nonce', 'maintenance_password'} or
-                data.get('action') not in ('install', 'uninstall') or
-                not isinstance(data.get('nonce'), str) or not HASH.fullmatch(data['nonce']) or
-                not isinstance(data.get('maintenance_password'), str)):
-            return self.json_reply(400, {'error': 'invalid maintenance request'})
+        # parse_authorization_request has already enforced fields and types.
+        # New native callers keep ALL secrets in the body, written only after
+        # certificate verification on the same WinHTTP request. Header support
+        # remains for older API callers; mixed forms are rejected, not guessed.
+        dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
+        if 'device_id' in data:
+            if dev_id or key:
+                return self.json_reply(400, {'error': 'ambiguous maintenance device credentials'})
+            dev_id, key = data['device_id'], data['device_key']
         event = self.store.authorize_maintenance(data['maintenance_password'], self.client_address[0],
-            data['action'], data['nonce'], self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', ''))
+            data['action'], data['nonce'], dev_id, key)
         if event is None:
             return self.json_reply(403, {'error': 'maintenance authorization denied or temporarily unavailable'})
         return self.json_reply(200, dict(event, authorized=True))

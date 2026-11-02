@@ -71,8 +71,8 @@ LRESULT CALLBACK on_message(HWND hwnd,UINT message,WPARAM wp,LPARAM lp){
                 MessageBoxW(hwnd,L"安装完成。Ohno 服务已启动，接下来由教师端批准这台设备。",
                     L"Ohno",MB_OK|MB_ICONINFORMATION);
                 DestroyWindow(hwnd);
-            }else{
-                MessageBoxW(hwnd,L"安装未完成，请检查教师端地址、证书和服务状态。此测试版会回滚已创建的安装文件。",
+            }else if(result!=2){
+                MessageBoxW(hwnd,L"安装未完成，请检查教师维护密码、教师端地址、证书和服务状态。此测试版会回滚已创建的安装文件。",
                     L"Ohno",MB_OK|MB_ICONERROR);
             }
             return 0;
@@ -102,5 +102,81 @@ int show_install_wizard(SetupCallback install){
         }
     }
     return state.result;
+}
+}
+
+namespace {
+struct PasswordPrompt {
+    HWND window=nullptr, edit=nullptr;
+    const std::wstring* server=nullptr;
+    std::wstring* output=nullptr;
+    bool accepted=false, uninstall=false;
+};
+LRESULT CALLBACK password_message(HWND hwnd,UINT message,WPARAM wp,LPARAM lp){
+    auto* state=reinterpret_cast<PasswordPrompt*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+    if(message==WM_NCCREATE){
+        state=static_cast<PasswordPrompt*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state));return TRUE;
+    }
+    if(message==WM_CREATE&&state){
+        state->window=hwnd;
+        caption(hwnd,state->uninstall?L"卸载需要教师维护密码（不是课堂 PIN）":L"新增安装需要教师维护密码（不是课堂 PIN）",18,14,535);
+        CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",state->server->c_str(),WS_VISIBLE|WS_CHILD|ES_READONLY|ES_AUTOHSCROLL,
+            18,49,535,27,hwnd,nullptr,nullptr,nullptr);
+        caption(hwnd,L"密码仅发送到上方教师端，不保存到本机或镜像。",18,88,535);
+        state->edit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_VISIBLE|WS_CHILD|WS_TABSTOP|ES_PASSWORD|ES_AUTOHSCROLL,
+            18,122,535,29,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(201)),nullptr,nullptr);
+        SendMessageW(state->edit,EM_SETLIMITTEXT,256,0);
+        CreateWindowW(L"BUTTON",L"确认",WS_VISIBLE|WS_CHILD|WS_TABSTOP|BS_DEFPUSHBUTTON,
+            327,171,105,32,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),nullptr,nullptr);
+        CreateWindowW(L"BUTTON",L"取消",WS_VISIBLE|WS_CHILD|WS_TABSTOP,
+            448,171,105,32,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)),nullptr,nullptr);
+        SetFocus(state->edit);return 0;
+    }
+    if(message==WM_COMMAND&&state){
+        if(LOWORD(wp)==IDOK){
+            const int length=GetWindowTextLengthW(state->edit);
+            if(length<=0||length>256){SetFocus(state->edit);return 0;}
+            // Read directly into the caller-owned wiping buffer; do not leave
+            // a password copy in the generic text helper's temporary vector.
+            state->output->resize(static_cast<std::size_t>(length)+1);
+            const int copied=GetWindowTextW(state->edit,state->output->data(),length+1);
+            if(copied!=length){
+                SecureZeroMemory(state->output->data(),state->output->size()*sizeof(wchar_t));
+                state->output->clear();SetFocus(state->edit);return 0;
+            }
+            state->output->resize(static_cast<std::size_t>(length));
+            SetWindowTextW(state->edit,L"");state->accepted=true;DestroyWindow(hwnd);return 0;
+        }
+        if(LOWORD(wp)==IDCANCEL){SetWindowTextW(state->edit,L"");DestroyWindow(hwnd);return 0;}
+    }
+    if(message==WM_CLOSE){if(state&&state->edit)SetWindowTextW(state->edit,L"");DestroyWindow(hwnd);return 0;}
+    // No PostQuitMessage: this is a nested modal loop inside the setup wizard.
+    if(message==WM_DESTROY)return 0;
+    return DefWindowProcW(hwnd,message,wp,lp);
+}
+}
+namespace ohno {
+bool prompt_maintenance_password(const std::wstring& server,bool uninstall,std::wstring& output){
+    WNDCLASSW wc{};wc.lpfnWndProc=password_message;wc.hInstance=GetModuleHandleW(nullptr);
+    wc.lpszClassName=L"OhnoMaintenancePasswordV1";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    wc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
+    if(!RegisterClassW(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return false;
+    PasswordPrompt state;state.server=&server;state.output=&output;state.uninstall=uninstall;
+    HWND owner=GetActiveWindow();
+    HWND window=CreateWindowExW(WS_EX_DLGMODALFRAME,wc.lpszClassName,L"Ohno - 教师维护授权",
+        WS_POPUP|WS_CAPTION|WS_SYSMENU,CW_USEDEFAULT,CW_USEDEFAULT,590,255,owner,nullptr,wc.hInstance,&state);
+    if(!window)return false;
+    if(owner)EnableWindow(owner,FALSE);
+    ShowWindow(window,SW_SHOWNORMAL);UpdateWindow(window);SetFocus(state.edit);
+    MSG message{};bool quit=false;
+    while(IsWindow(window)){
+        const auto result=GetMessageW(&message,nullptr,0,0);
+        if(result<=0){quit=result==0;DestroyWindow(window);break;}
+        if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}
+    }
+    if(owner){EnableWindow(owner,TRUE);SetActiveWindow(owner);}
+    if(quit)PostQuitMessage(static_cast<int>(message.wParam));
+    return state.accepted;
 }
 }

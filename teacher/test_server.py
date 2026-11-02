@@ -137,6 +137,22 @@ class TeacherIntegration(unittest.TestCase):
         self.assertEqual(json.loads(body)['device_id'], 'Q'*24)
         self.assertFalse(self.store.data['devices']['Q'*24]['approved'])
 
+    def test_native_uninstall_sends_device_secrets_only_in_body(self):
+        self.store.set_maintenance_password('A classroom maintenance phrase!')
+        auth = self.approved_device()
+        request = {'action': 'uninstall', 'nonce': 'd'*64,
+                   'maintenance_password': 'A classroom maintenance phrase!',
+                   'device_id': auth['X-Ohno-Device'], 'device_key': auth['X-Ohno-Key']}
+        self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', json.dumps(request))[0], 200)
+        self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', json.dumps(request), auth)[0], 400)
+        for change in [dict(request, action='install'), dict(request, device_key='bad'),
+                       {k: v for k, v in request.items() if k != 'device_key'}]:
+            self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', json.dumps(change))[0], 400)
+        self.form('/device', {'csrf': self.csrf(), 'id': request['device_id'], 'approved': '0'})
+        self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', json.dumps(request))[0], 200)
+        self.store.set_maintenance_password(None)
+        self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', json.dumps(request))[0], 403)
+
     def test_maintenance_password_is_not_classroom_pin(self):
         self.store.set_maintenance_password('A classroom maintenance phrase!')
         self.store.set_unlock_pin('2468')
