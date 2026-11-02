@@ -30,24 +30,32 @@ void set_worker_test_hooks(void(*hook)(unsigned,DWORD),bool fail_drain){test_hoo
 #endif
 struct WorkerProcess::Impl {
     Handle job,process,stop,read;UpdateRevision revision;std::string transaction;
+    bool shutdown_started=false;ULONGLONG shutdown_tick=0;
     bool end() noexcept {
+        if(!shutdown_started){shutdown_started=true;shutdown_tick=GetTickCount64();}
         if(stop.h)SetEvent(stop.h);
-        if(process.h)WaitForSingleObject(process.h,8000);
-        if(!job.h)return !process.h||WaitForSingleObject(process.h,0)==WAIT_OBJECT_0;
+        const auto elapsed=GetTickCount64()-shutdown_tick;
+        if(process.h&&elapsed<8000)WaitForSingleObject(process.h,static_cast<DWORD>(8000-elapsed));
+        auto main_exited=[&]{return !process.h||WaitForSingleObject(process.h,0)==WAIT_OBJECT_0;};
+        if(!job.h)return main_exited();
         JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
         if(!QueryInformationJobObject(job.h,JobObjectBasicAccountingInformation,&info,sizeof(info),nullptr))return false;
-        if(info.ActiveProcesses&& !TerminateJobObject(job.h,1))return false;
-        const auto start=GetTickCount64();
+        if(info.ActiveProcesses&&!TerminateJobObject(job.h,1))return false;
         do {
             if(!QueryInformationJobObject(job.h,JobObjectBasicAccountingInformation,&info,sizeof(info),nullptr))return false;
-            if(!info.ActiveProcesses){CloseHandle(job.h);job.h=nullptr;return true;}
+            if(!info.ActiveProcesses&&main_exited()){CloseHandle(job.h);job.h=nullptr;return true;}
             Sleep(20);
-        }while(GetTickCount64()-start<3000);
-        // Keep the job owned until destructor/host exit. Do not authorize a
-        // second worker just because termination was requested asynchronously.
+        }while(GetTickCount64()-shutdown_tick<11000);
+        // Termination is asynchronous. Unconfirmed drain never permits another
+        // worker, and repeated cleanup shares this same shutdown deadline.
         return false;
     }
-    ~Impl(){end();}
+    ~Impl(){
+        if(!shutdown_started)end();
+        // A previously failed explicit drain gets no second graceful wait.
+        // Handle destruction closes the final non-inherited job handle.
+        if(job.h)TerminateJobObject(job.h,1);
+    }
 };
 WorkerProcess::WorkerProcess():impl(std::make_unique<Impl>()) {}
 void WorkerProcess::start(WindowsUpdateJournal& storage,const UpdateRevision& revision,
