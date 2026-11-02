@@ -20,10 +20,12 @@ int main() {
     assert(cfg.certificate_pem==cert);
     // Installer reads only the last 17 KB of the EXE, not its entire body.
     assert(ohno::decode_school_bundle(exe.substr(1),cfg)==ohno::BootstrapResult::Ready);
-    auto corrupt=exe;corrupt[corrupt.size()-16]=char(255);
+    auto corrupt=exe;corrupt[corrupt.size()-16]='\xff';
     assert(ohno::decode_school_bundle(corrupt,cfg)==ohno::BootstrapResult::Invalid);
     auto invalid_cert=exe;
     invalid_cert.replace(2+7000+server.size(),5,"hello");
     assert(ohno::decode_school_bundle(invalid_cert,cfg)==ohno::BootstrapResult::Invalid);
+    auto nul_cert=exe;nul_cert[2+7000+server.size()+30]='\0';
+    assert(ohno::decode_school_bundle(nul_cert,cfg)==ohno::BootstrapResult::Invalid);
     return 0;
 }

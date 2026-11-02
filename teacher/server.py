@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ohno teacher service. No external Python packages; HTTPS is mandatory."""
+"""Ohno teacher service with a loopback control UI and a separate HTTPS API."""
 import argparse
 import hashlib
 import hmac
@@ -19,11 +19,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
-from school_installer import build_school_installer
+from school_installer import HOSTNAME, build_school_installer, enrollment_origin
 
 MAX_BODY = 65536
+MAX_REQUESTS = 10000
 PIN_ITERATIONS = 160000
-HOSTNAME = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 ID = re.compile(r'[A-Za-z0-9_-]{16,128}\Z')
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
@@ -39,6 +39,17 @@ def pin_hash(pin, salt):
 
 def esc(value):
     return html.escape(str(value), quote=True)
+
+
+def valid_text(value, limit, allow_empty=False):
+    if (not isinstance(value, str) or not (0 if allow_empty else 1) <= len(value) <= limit
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        return False
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        return False
+    return True
 
 
 def valid_mac(value):
@@ -73,6 +84,19 @@ class Store:
         if 'unlock_pin_hash' not in self.data:
             self.data['unlock_pin_hash'] = None
             migrated = True
+        # Older clients created another pending row on every retry. Keep the
+        # newest copy so upgrading also recovers queues already filled by this.
+        seen = set()
+        requests = []
+        for item in reversed(self.data['requests']):
+            identity = (item['device_id'], item['kind'], item['object'])
+            if item['state'] == 'pending':
+                if identity in seen:
+                    migrated = True
+                    continue
+                seen.add(identity)
+            requests.append(item)
+        self.data['requests'] = requests[::-1]
         if migrated:
             self.save()
 
@@ -146,6 +170,78 @@ class Store:
                 return None
             return dev
 
+    def add_request(self, dev_id, kind, obj, label='', approved=False):
+        """Coalesce retries and reclaim finished history before rejecting new work."""
+        with self.lock:
+            now = int(time.time())
+            requests = self.data['requests']
+            for item in requests:
+                if (item['device_id'] == dev_id and item['kind'] == kind and item['object'] == obj
+                        and (item['state'] == 'pending' or
+                             (item['state'] == 'approved' and item.get('expires', 0) > now))):
+                    if approved:
+                        item.update(state='approved', expires=now + 3600)
+                        self.save()
+                    return item
+            if len(requests) >= MAX_REQUESTS:
+                finished = next((i for i, item in enumerate(requests)
+                    if item['state'] != 'pending' and
+                    (item['state'] != 'approved' or item.get('expires', 0) <= now)), None)
+                if finished is None:
+                    return None
+                del requests[finished]
+            item = {'id': secrets.token_urlsafe(18), 'device_id': dev_id, 'kind': kind,
+                    'object': obj, 'label': label, 'state': 'approved' if approved else 'pending',
+                    'created': now}
+            if approved:
+                item['expires'] = now + 3600
+            requests.append(item)
+            self.save()
+            return item
+
+
+class TeacherHTTPServer(ThreadingHTTPServer):
+    """Bound connection work; TLS handshakes must never block the accept loop."""
+    allow_reuse_address = os.name != 'nt'
+    request_queue_size = 64
+    request_timeout = 10
+
+    def __init__(self, address, handler, *, ssl_context=None, max_workers=64):
+        self.ssl_context = ssl_context
+        self.workers = threading.BoundedSemaphore(max_workers)
+        if ':' in address[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(address, handler)
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+    def process_request(self, request, client_address):
+        request.settimeout(self.request_timeout)
+        if not self.workers.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.workers.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            if self.ssl_context:
+                request = self.ssl_context.wrap_socket(request, server_side=True)
+            self.finish_request(request, client_address)
+        except (ConnectionError, TimeoutError, ssl.SSLError):
+            pass
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            self.workers.release()
+
 
 STYLE = '''<style>body{font:16px system-ui,sans-serif;max-width:1050px;margin:2rem auto;padding:0 1rem;color:#25303a}h1{color:#293c66}section{border:1px solid #ddd;border-radius:10px;padding:1rem;margin:1rem 0}input,textarea,button{font:inherit;padding:.5rem;max-width:100%}textarea{width:95%;height:8rem}button{cursor:pointer}table{border-collapse:collapse;width:100%}td,th{padding:.5rem;border-bottom:1px solid #ddd;text-align:left}small{color:#555}.ok{color:#17613a}.pending{color:#9a4a00}</style>'''
 
@@ -197,7 +293,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if length < 0 or length > MAX_BODY:
             return None
-        return self.rfile.read(length)
+        body = self.rfile.read(length)
+        return body if len(body) == length else None
 
     def redirect(self, location):
         self.reply(303, '', headers=[('Location', location)])
@@ -300,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(raw)
                 if not isinstance(data, dict): raise ValueError()
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 return self.json_reply(400, {'error': 'invalid JSON'})
             if self.path == '/api/device/register':
                 return self.register(data)
@@ -316,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError):
             return self.reply(400, 'Invalid form')
         one = lambda key: form.get(key, [''])[0]
-        if not hmac.compare_digest(self.server.control_csrf, one('csrf')):
+        if not hmac.compare_digest(self.server.control_csrf.encode('utf-8'), one('csrf').encode('utf-8')):
             return self.reply(403, 'Invalid CSRF token')
         if self.path == '/unlock-pin':
             action = one('action')
@@ -373,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
         macs, primary = data.get('macs', []), data.get('primary_mac', '')
         if (tun is not None and not isinstance(tun, bool)) or (wfp is not None and not isinstance(wfp, bool)):
             return self.json_reply(400, {'error': 'invalid status'})
-        if not all(isinstance(x, str) for x in (dev_id, key, name)) or not ID.fullmatch(dev_id) or not ID.fullmatch(key) or not 1 <= len(name) <= 128:
+        if not all(isinstance(x, str) for x in (dev_id, key)) or not ID.fullmatch(dev_id) or not ID.fullmatch(key) or not valid_text(name, 128):
             return self.json_reply(400, {'error': 'invalid device registration'})
         if (not isinstance(macs, list) or len(macs) > 16 or
                 any(not valid_mac(x) for x in macs) or len(set(macs)) != len(macs) or
@@ -414,32 +511,27 @@ class Handler(BaseHTTPRequestHandler):
         with self.store.lock:
             if not self.store.device(dev_id, key):
                 return self.json_reply(403, {'error': 'device not authorized'})
-            if len(self.store.data['requests']) >= 10000:
+            item = self.store.add_request(dev_id, 'pause', '*', approved=True)
+            if item is None:
                 return self.json_reply(429, {'error': 'request capacity'})
-            item = {'id': secrets.token_urlsafe(18), 'device_id': dev_id, 'kind': 'pause', 'object': '*', 'state': 'approved', 'created': int(time.time()), 'expires': int(time.time()) + 3600}
-            self.store.data['requests'].append(item)
-            self.store.save()
         return self.json_reply(201, {'expires': item['expires']})
 
     def submit_request(self, data):
         dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
         kind, obj = data.get('kind'), data.get('object')
         label = data.get('label', '')
-        if not isinstance(label, str) or len(label) > 128 or '/' in label or '\\' in label or any(ord(c) < 32 for c in label):
+        if not valid_text(label, 128, allow_empty=True) or '/' in label or '\\' in label:
             return self.json_reply(400, {'error': 'invalid program label'})
-        if not isinstance(kind, str) or kind not in ('website', 'application', 'network', 'local_html') or not isinstance(obj, str) or not 1 <= len(obj) <= 512:
+        if not isinstance(kind, str) or kind not in ('website', 'application', 'network', 'local_html') or not valid_text(obj, 512):
             return self.json_reply(400, {'error': 'invalid request'})
         if (kind == 'website' and not HOSTNAME.fullmatch(obj)) or (kind in ('application','network') and not HASH.fullmatch(obj)):
             return self.json_reply(400, {'error': 'invalid object identity'})
         with self.store.lock:
             if not self.store.device(dev_id, key):
                 return self.json_reply(403, {'error': 'device not authorized'})
-            requests = self.store.data['requests']
-            if len(requests) >= 10000:
+            item = self.store.add_request(dev_id, kind, obj, label)
+            if item is None:
                 return self.json_reply(429, {'error': 'request capacity'})
-            item = {'id': secrets.token_urlsafe(18), 'device_id': dev_id, 'kind': kind, 'object': obj, 'label': label, 'state': 'pending', 'created': int(time.time())}
-            requests.append(item)
-            self.store.save()
         return self.json_reply(201, {'id': item['id']})
 
 
@@ -493,42 +585,35 @@ def locate_base_installer():
 
 def serve_teacher(state, cert, key, bind, port, enrollment_host=None, open_browser=False, control_port=8765):
     store = Store(state)
-
-    # LAN-facing student API: HTTPS only, no teacher management routes.
-    api = ThreadingHTTPServer((bind, port), Handler)
-    api.store = store
-    api.control = False
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert, key)
-    api.socket = context.wrap_socket(api.socket, server_side=True)
 
-    # Teacher control plane: plain HTTP is safe here because the socket is
-    # physically bound to loopback. No password, no LAN exposure, no cert warning.
-    control = ThreadingHTTPServer(('127.0.0.1', control_port), Handler)
-    control.store = store
-    control.control = True
-    control.control_csrf = secrets.token_urlsafe(32)
-    control.school_installer_exe = locate_base_installer()
-    if enrollment_host and control.school_installer_exe:
-        control.enrollment_origin = 'https://' + enrollment_host + ':' + str(port)
-        control.public_certificate = Path(cert).read_bytes()
+    # Context managers also release the first port if the second bind fails.
+    with TeacherHTTPServer((bind, port), Handler, ssl_context=context) as api, \
+            TeacherHTTPServer(('127.0.0.1', control_port), Handler) as control:
+        api.store = control.store = store
+        api.control = False
+        control.control = True
+        control.control_csrf = secrets.token_urlsafe(32)
+        control.school_installer_exe = locate_base_installer()
+        if enrollment_host and control.school_installer_exe:
+            control.enrollment_origin = enrollment_origin(enrollment_host, api.server_port)
+            control.public_certificate = Path(cert).read_bytes()
 
-    api_thread = threading.Thread(target=api.serve_forever, daemon=True)
-    api_thread.start()
-    print('ohno student API listening on https://%s:%d' % api.server_address)
-    print('ohno teacher control listening on http://127.0.0.1:%d' % control.server_port)
-    if open_browser:
-        webbrowser.open('http://127.0.0.1:' + str(control.server_port) + '/', new=2)
-    try:
-        control.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        control.server_close()
-        api.shutdown()
-        api.server_close()
-        api_thread.join(timeout=5)
+        api_thread = threading.Thread(target=api.serve_forever, daemon=True)
+        api_thread.start()
+        try:
+            print('ohno student API listening on https://%s:%d' % api.server_address[:2])
+            print('ohno teacher control listening on http://127.0.0.1:%d' % control.server_port)
+            if open_browser:
+                webbrowser.open('http://127.0.0.1:' + str(control.server_port) + '/', new=2)
+            control.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            api.shutdown()
+            api_thread.join(timeout=5)
 
 
 def easy_start():

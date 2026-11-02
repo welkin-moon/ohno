@@ -30,6 +30,7 @@ inline BootstrapResult decode_school_bundle(const std::string& tail, SchoolBoots
     if (url.rfind("https://",0)!=0 || url.find_first_of("\r\n\t\0",0)!=std::string::npos ||
         cert.rfind("-----BEGIN CERTIFICATE-----",0)!=0 ||
         cert.find("-----END CERTIFICATE-----")==std::string::npos ||
+        cert.find('\0')!=std::string::npos ||
         cert.find("PRIVATE KEY")!=std::string::npos)
         return BootstrapResult::Invalid;
     for (unsigned char ch:url) if(ch<33 || ch>126) return BootstrapResult::Invalid;

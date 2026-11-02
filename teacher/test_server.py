@@ -1,16 +1,16 @@
 import http.client
 import json
 import re
+import socket
 import ssl
-import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from urllib.parse import urlencode
-from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
-from server import Handler, Store, create_certificate
+from server import Handler, Store, TeacherHTTPServer, create_certificate, serve_teacher
 from school_installer import get_school_configuration
 
 
@@ -20,20 +20,16 @@ class TeacherIntegration(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         root = Path(cls.temp.name)
         cls.store = Store.initialize(root/'state.json')
-        subprocess.run([
-            'openssl','req','-x509','-newkey','rsa:2048','-nodes',
-            '-keyout',str(root/'key.pem'),'-out',str(root/'cert.pem'),
-            '-days','1','-subj','/CN=localhost'
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        create_certificate(root/'cert.pem', root/'key.pem', 'localhost')
 
-        cls.api = ThreadingHTTPServer(('127.0.0.1',0), Handler)
-        cls.api.store = cls.store
-        cls.api.control = False
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(root/'cert.pem',root/'key.pem')
-        cls.api.socket = context.wrap_socket(cls.api.socket,server_side=True)
+        cls.api = TeacherHTTPServer(('127.0.0.1',0), Handler, ssl_context=context)
+        cls.api.store = cls.store
+        cls.api.control = False
+        cls.client_context = ssl.create_default_context(cafile=str(root/'cert.pem'))
 
-        cls.control = ThreadingHTTPServer(('127.0.0.1',0), Handler)
+        cls.control = TeacherHTTPServer(('127.0.0.1',0), Handler)
         cls.control.store = cls.store
         cls.control.control = True
         cls.control.control_csrf = 'test-control-csrf'
@@ -48,6 +44,12 @@ class TeacherIntegration(unittest.TestCase):
         ]
         for thread in cls.threads: thread.start()
 
+    def setUp(self):
+        # Each test gets independent state while reusing the listening sockets.
+        root = Path(self.temp.name) / self._testMethodName
+        self.store = Store.initialize(root/'state.json')
+        self.api.store = self.control.store = self.store
+
     @classmethod
     def tearDownClass(cls):
         for server in (cls.api,cls.control): server.shutdown(); server.server_close()
@@ -56,7 +58,7 @@ class TeacherIntegration(unittest.TestCase):
 
     def api_req(self,method,path,body=None,headers=None,raw=False):
         connection=http.client.HTTPSConnection('127.0.0.1',self.api.server_port,
-            context=ssl._create_unverified_context(),timeout=5)
+            context=self.client_context,timeout=5)
         headers=dict(headers or {});headers.setdefault('Host','teacher-pc')
         connection.request(method,path,body,headers)
         response=connection.getresponse();payload=response.read();result=(response.status,dict(response.getheaders()),payload if raw else payload.decode())
@@ -79,6 +81,142 @@ class TeacherIntegration(unittest.TestCase):
     def form(self,path,values):
         status,_,text=self.control_req('POST',path,urlencode(values))
         self.assertEqual(status,303,text)
+
+    def approved_device(self):
+        dev, key = 'R'*24, 'S'*32
+        payload = {'id': dev, 'key': key, 'name': 'test-pc',
+                   'macs': ['00:15:5d:77:88:99'], 'primary_mac': '00:15:5d:77:88:99'}
+        self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps(payload))[0], 201)
+        self.form('/device', {'csrf': self.csrf(), 'id': dev, 'approved': '1'})
+        return {'X-Ohno-Device': dev, 'X-Ohno-Key': key}
+
+    def test_invalid_unicode_does_not_poison_device_state(self):
+        payload = {'id': 'X'*24, 'key': 'Y'*32, 'name': '\ud800'}
+        self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps(payload))[0], 400)
+        self.assertNotIn(payload['id'], self.store.data['devices'])
+        self.assertEqual(self.control_req('GET', '/')[0], 200)
+        auth = self.approved_device()
+        for kind, obj, label in [('application', 'a'*64, '\udfff'), ('local_html', '\ud800', '')]:
+            with self.subTest(kind=kind):
+                self.assertEqual(self.api_req('POST', '/api/device/request',
+                    json.dumps({'kind': kind, 'object': obj, 'label': label}), auth)[0], 400)
+        self.assertEqual(self.store.data['requests'], [])
+
+    def test_non_ascii_csrf_is_rejected(self):
+        self.assertEqual(self.control_req('POST', '/policy', urlencode({'csrf': '错误'}))[0], 403)
+
+    def test_idle_tls_peer_does_not_block_api(self):
+        with socket.create_connection(('127.0.0.1', self.api.server_port), timeout=5):
+            self.assertEqual(self.api_req('GET', '/health')[0], 200)
+
+    def test_connection_limit_and_idle_timeout_release_worker(self):
+        started, released = threading.Event(), threading.Event()
+        class TrackedHandler(Handler):
+            def setup(self):
+                super().setup()
+                started.set()
+        class TrackedServer(TeacherHTTPServer):
+            def process_request_thread(self, *args):
+                try:
+                    super().process_request_thread(*args)
+                finally:
+                    released.set()
+        with TrackedServer(('127.0.0.1', 0), TrackedHandler, max_workers=1) as server:
+            server.request_timeout = 2
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                address = server.server_address
+                with socket.create_connection(address, timeout=5) as idle:
+                    self.assertTrue(started.wait(5))
+                    with socket.create_connection(address, timeout=5) as rejected:
+                        try:
+                            self.assertEqual(rejected.recv(1), b'')
+                        except ConnectionResetError:
+                            pass
+                    self.assertEqual(idle.recv(1), b'')
+                self.assertTrue(released.wait(5))
+                connection = http.client.HTTPConnection(*address, timeout=5)
+                try:
+                    connection.request('GET', '/health')
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    response.read()
+                finally:
+                    connection.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_truncated_body_and_deep_json_are_rejected(self):
+        with socket.create_connection(('127.0.0.1', self.control.server_port), timeout=5) as peer:
+            peer.sendall(b'POST /policy HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 10\r\n\r\nxx')
+            peer.shutdown(socket.SHUT_WR)
+            with peer.makefile('rb') as response:
+                self.assertIn(b' 413 ', response.readline())
+        self.assertEqual(self.api_req('POST', '/api/device/register',
+            '['*2000 + '0' + ']'*2000)[0], 400)
+
+    def test_control_bind_failure_releases_api_port(self):
+        created = []
+        def make_server(*args, **kwargs):
+            server = TeacherHTTPServer(*args, **kwargs)
+            created.append(server)
+            return server
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            with patch('server.TeacherHTTPServer', side_effect=make_server):
+                with self.assertRaises(OSError):
+                    root = Path(self.temp.name)
+                    serve_teacher(self.store.path, root/'cert.pem', root/'key.pem',
+                                  '127.0.0.1', 0, control_port=occupied.getsockname()[1])
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].socket.fileno(), -1)
+
+    def test_retried_requests_are_idempotent_even_at_capacity(self):
+        auth = self.approved_device()
+        body = json.dumps({'kind': 'website', 'object': 'game.example'})
+        status, _, result = self.api_req('POST', '/api/device/request', body, auth)
+        self.assertEqual(status, 201)
+        request_id = json.loads(result)['id']
+        for _ in range(3):
+            status, _, result = self.api_req('POST', '/api/device/request', body, auth)
+            self.assertEqual(status, 201)
+            self.assertEqual(json.loads(result)['id'], request_id)
+        self.assertEqual(len(self.store.data['requests']), 1)
+        with self.store.lock:
+            self.store.data['requests'].extend(
+                dict(id=str(i), device_id='other', kind='website', object='other.example',
+                     state='pending', created=1) for i in range(9999))
+        self.assertEqual(self.api_req('POST', '/api/device/request', body, auth)[0], 201)
+        self.assertEqual(self.api_req('POST', '/api/device/request',
+            json.dumps({'kind': 'website', 'object': 'new.example'}), auth)[0], 429)
+        with self.store.lock:
+            self.store.data['requests'][1]['state'] = 'denied'
+        self.assertEqual(self.api_req('POST', '/api/device/request',
+            json.dumps({'kind': 'website', 'object': 'new.example'}), auth)[0], 201)
+        self.assertEqual(len(self.store.data['requests']), 10000)
+        self.assertEqual(self.store.data['requests'][0]['id'], request_id)
+
+    def test_repeated_unlock_renews_one_grant(self):
+        auth = self.approved_device()
+        self.store.set_unlock_pin('2468')
+        for _ in range(3):
+            self.assertEqual(self.api_req('POST', '/api/device/unlock',
+                json.dumps({'pin': '2468'}), auth)[0], 201)
+        self.assertEqual(len(self.store.data['requests']), 1)
+
+    def test_upgrade_compacts_duplicate_pending_history(self):
+        original = dict(id='first', device_id='old-device', kind='application',
+                        object='a'*64, state='pending', created=1)
+        self.store.data['requests'] = [original, dict(original, id='latest'),
+                                      dict(original, id='denied', state='denied')]
+        self.store.save()
+        loaded = Store(self.store.path)
+        self.assertEqual([item['id'] for item in loaded.data['requests']], ['latest', 'denied'])
+        self.assertEqual(json.loads(self.store.path.read_text('utf-8'))['requests'],
+                         loaded.data['requests'])
 
     def test_management_is_loopback_only_and_passwordless(self):
         self.assertEqual(self.api_req('GET','/')[0],404)

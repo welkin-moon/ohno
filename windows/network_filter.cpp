@@ -23,17 +23,20 @@ bool NetworkFilter::add(const std::wstring& path,Item& item){
     FwpmFreeMemory0(reinterpret_cast<void**>(&id));item.blocked=result==ERROR_SUCCESS;return item.blocked;
 }
 void NetworkFilter::remove(Item& item){if(item.blocked){FwpmFilterDeleteById0(engine_,item.v4);FwpmFilterDeleteById0(engine_,item.v6);item.blocked=false;}}
+bool NetworkFilter::granted(const Item& item) const{return std::find(allowed_.begin(),allowed_.end(),item.hash)!=allowed_.end();}
 bool NetworkFilter::register_untrusted(const std::wstring& path,const std::string& hash){
     if(!engine_||paused_)return false;
     auto it=items_.find(path);if(it!=items_.end()&&it->second.hash!=hash){remove(it->second);items_.erase(it);it=items_.end();}
     if(it==items_.end())it=items_.emplace(path,Item{hash}).first;
+    if(granted(it->second)){remove(it->second);return false;}
     return it->second.blocked||add(path,it->second);
 }
 void NetworkFilter::apply_grants(const std::vector<std::string>& hashes){
+    allowed_=hashes;
     if(!engine_||paused_)return;
-    for(auto& entry:items_){auto& item=entry.second;bool granted=std::find(hashes.begin(),hashes.end(),item.hash)!=hashes.end();if(granted)remove(item);else if(!item.blocked)add(entry.first,item);}
+    for(auto& entry:items_){auto& item=entry.second;if(granted(item))remove(item);else if(!item.blocked)add(entry.first,item);}
 }
 void NetworkFilter::set_paused(bool paused){
     if(!engine_||paused_==paused)return;paused_=paused;
-    for(auto& entry:items_){if(paused_)remove(entry.second);else if(!entry.second.blocked)add(entry.first,entry.second);}
+    for(auto& entry:items_){if(paused_||granted(entry.second))remove(entry.second);else if(!entry.second.blocked)add(entry.first,entry.second);}
 }

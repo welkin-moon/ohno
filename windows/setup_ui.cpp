@@ -36,15 +36,15 @@ LRESULT CALLBACK on_message(HWND hwnd,UINT message,WPARAM wp,LPARAM lp){
         caption(hwnd,L"教师端 HTTPS 地址（例：https://teacher-pc:8443）",18,48);
         wizard->url=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"https://ohno-teacher:8443",
             WS_VISIBLE|WS_CHILD|WS_TABSTOP|ES_AUTOHSCROLL,18,78,440,27,
-            hwnd,reinterpret_cast<HMENU>(url_field),nullptr,nullptr);
+            hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(url_field)),nullptr,nullptr);
         caption(hwnd,L"教师端证书（自签名 HTTPS 时需要，学校 IT 提供）",18,117);
         wizard->cert=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",
             WS_VISIBLE|WS_CHILD|WS_TABSTOP|ES_AUTOHSCROLL,18,148,338,27,
-            hwnd,reinterpret_cast<HMENU>(cert_field),nullptr,nullptr);
+            hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(cert_field)),nullptr,nullptr);
         CreateWindowW(L"BUTTON",L"浏览…",WS_VISIBLE|WS_CHILD|WS_TABSTOP,
-            367,147,91,29,hwnd,reinterpret_cast<HMENU>(browse_button),nullptr,nullptr);
+            367,147,91,29,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(browse_button)),nullptr,nullptr);
         wizard->button=CreateWindowW(L"BUTTON",L"安装",WS_VISIBLE|WS_CHILD|WS_TABSTOP|BS_DEFPUSHBUTTON,
-            348,202,110,34,hwnd,reinterpret_cast<HMENU>(install_button),nullptr,nullptr);
+            348,202,110,34,hwnd,reinterpret_cast<HMENU>(static_cast<INT_PTR>(install_button)),nullptr,nullptr);
         caption(hwnd,L"安装后自动启动服务；电脑需经教师批准。",18,207,315);
         return 0;
     }
