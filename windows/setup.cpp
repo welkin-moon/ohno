@@ -39,38 +39,8 @@ bool create_program_directory(const std::wstring& path){
     const bool ok=CreateDirectoryW(path.c_str(),&attributes)!=FALSE;LocalFree(descriptor);return ok;
 }
 bool valid_url(const wchar_t* url){for(auto p=url;*p;++p)if(*p<33||*p>126)return false;URL_COMPONENTSW c{};c.dwStructSize=sizeof(c);c.dwHostNameLength=DWORD(-1);c.dwUserNameLength=DWORD(-1);c.dwPasswordLength=DWORD(-1);c.dwUrlPathLength=DWORD(-1);c.dwExtraInfoLength=DWORD(-1);return WinHttpCrackUrl(url,0,0,&c)&&c.nScheme==INTERNET_SCHEME_HTTPS&&c.nPort!=0&&c.dwHostNameLength&&!c.dwUserNameLength&&!c.dwPasswordLength&&!c.dwExtraInfoLength&&c.dwUrlPathLength<=1;}
-// This changes machine-wide certificate trust. School administrators must
-// verify the teacher endpoint before distributing a personalized installer.
-bool import_root_context(PCCERT_CONTEXT certificate,HKEY config){
-    if(!certificate)return false;
-    HCERTSTORE roots=CertOpenStore(CERT_STORE_PROV_SYSTEM_W,0,0,CERT_SYSTEM_STORE_LOCAL_MACHINE,L"ROOT");
-    if(!roots)return false;
-    bool result=false;BYTE hash[20]{};DWORD size=sizeof(hash);
-    if(CertCompareCertificateName(X509_ASN_ENCODING,&certificate->pCertInfo->Subject,&certificate->pCertInfo->Issuer)&&
-        CertGetCertificateContextProperty(certificate,CERT_SHA1_HASH_PROP_ID,hash,&size)&&size==sizeof(hash)){
-        CRYPT_HASH_BLOB blob{size,hash};
-        PCCERT_CONTEXT existing=CertFindCertificateInStore(roots,X509_ASN_ENCODING|PKCS_7_ASN_ENCODING,0,CERT_FIND_SHA1_HASH,&blob,nullptr);
-        if(existing){CertFreeCertificateContext(existing);result=true;}
-        else if(RegSetValueExW(config,L"ImportedRootSha1",0,REG_BINARY,hash,size)==ERROR_SUCCESS){
-            if(CertAddCertificateContextToStore(roots,certificate,CERT_STORE_ADD_NEW,nullptr))result=true;
-            else RegDeleteValueW(config,L"ImportedRootSha1");
-        }
-    }
-    CertCloseStore(roots,0);
-    return result;
-}
-bool import_root_pem(const std::string& pem,HKEY config){
-    DWORD der_length=0;
-    if(!CryptStringToBinaryA(pem.c_str(),static_cast<DWORD>(pem.size()),CRYPT_STRING_BASE64HEADER,
-        nullptr,&der_length,nullptr,nullptr)||!der_length||der_length>16384)return false;
-    std::vector<BYTE> der(der_length);
-    if(!CryptStringToBinaryA(pem.c_str(),static_cast<DWORD>(pem.size()),CRYPT_STRING_BASE64HEADER,
-        der.data(),&der_length,nullptr,nullptr))return false;
-    PCCERT_CONTEXT cert=CertCreateCertificateContext(X509_ASN_ENCODING|PKCS_7_ASN_ENCODING,der.data(),der_length);
-    if(!cert)return false;
-    bool ok=import_root_context(cert,config);
-    CertFreeCertificateContext(cert);return ok;
-}
+// Compatibility cleanup only: older installers recorded the exact root they
+// added. New managed installs pin the public PEM and never add system trust.
 bool remove_imported_certificate(HKEY config){
     BYTE hash[20]{};DWORD size=sizeof(hash),type=0;
     LONG q=RegQueryValueExW(config,L"ImportedRootSha1",nullptr,&type,hash,&size);
@@ -210,7 +180,8 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         if(!register_uninstaller(dir,maintenance,made_uninstaller)){std::fwprintf(stderr,L"Cannot register uninstaller.\n");break;}
         if(!make_shortcut(helper,shortcut)){std::fwprintf(stderr,L"Cannot create request shortcut.\n");break;}
         if(!shortcut.empty()&&RegSetValueExW(config.h,L"Shortcut",0,REG_SZ,reinterpret_cast<const BYTE*>(shortcut.c_str()),static_cast<DWORD>((shortcut.size()+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot record request shortcut.\n");break;}
-        if(!pem.empty()&&!import_root_pem(pem,config.h)){std::fwprintf(stderr,L"Cannot import teacher certificate (%lu)\n",GetLastError());break;}
+        // All managed transports authenticate against the saved public pin.
+        // Do not expand machine-wide root trust just to reach this one server.
         std::wstring quoted=L"\""+exe+L"\"";
         sc svc{CreateServiceW(manager.h,service_name,L"ohno prototype",SERVICE_ALL_ACCESS,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,quoted.c_str(),nullptr,nullptr,nullptr,nullptr,nullptr)};
         if(!svc.h){std::fwprintf(stderr,L"Cannot register service (%lu)\n",GetLastError());break;}
