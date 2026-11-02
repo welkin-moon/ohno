@@ -33,8 +33,8 @@ def call(method,path,body=None,headers=None):
     conn.request(method,path,body,headers or {});r=conn.getresponse();result=(r.status,dict(r.getheaders()),r.read().decode());conn.close();return result
 
 
-def control_call(method,path,body=None,headers=None):
-    conn=http.client.HTTPConnection('127.0.0.1',8765,timeout=5)
+def control_call(method,path,body=None,headers=None,timeout=5):
+    conn=http.client.HTTPConnection('127.0.0.1',8765,timeout=timeout)
     hdrs=dict(headers or {});hdrs.setdefault('Host','127.0.0.1')
     conn.request(method,path,body,hdrs);r=conn.getresponse();result=(r.status,dict(r.getheaders()),r.read().decode());conn.close();return result
 
@@ -201,7 +201,13 @@ def main():
             def publish(version,worker_name='ohno-worker.exe'):
                 files={name:(root/(worker_name if name=='ohno-worker.exe' else name)).read_bytes() for name in FILES}
                 package=build_package(version,files)
-                status,_,body=control_call('POST','/updates/approve',package,{'Content-Type':'application/octet-stream','X-Ohno-CSRF':csrf})
+                # Real packages include the TUN engine, unlike tiny parser fixtures.
+                # Allow bounded time for the catalog's durable write and signature;
+                # this is not a retry of an uncertain approval.
+                try:
+                    status,_,body=control_call('POST','/updates/approve',package,{'Content-Type':'application/octet-stream','X-Ohno-CSRF':csrf},timeout=60)
+                except Exception:
+                    update_diagnostics();raise
                 if status!=200:raise RuntimeError('fixture release approval failed: '+str(status)+' '+body)
                 print('Fixture package approved',version,len(package),body,flush=True)
                 return json.loads(body)
