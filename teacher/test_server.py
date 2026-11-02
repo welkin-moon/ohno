@@ -90,6 +90,100 @@ class TeacherIntegration(unittest.TestCase):
         self.form('/device', {'csrf': self.csrf(), 'id': dev, 'approved': '1'})
         return {'X-Ohno-Device': dev, 'X-Ohno-Key': key}
 
+    def maintenance_request(self, password='A classroom maintenance phrase!', action='install', auth=None, nonce='c'*64):
+        return self.api_req('POST', '/api/maintenance/authorize', json.dumps({
+            'action': action, 'nonce': nonce, 'maintenance_password': password}), auth)
+
+    def test_maintenance_control_and_authorization_are_separate(self):
+        self.assertEqual(self.maintenance_request()[0], 403)
+        self.assertEqual(self.control_req('POST', '/api/maintenance/authorize', '{}')[0], 404)
+        values = {'csrf': self.csrf(), 'action': 'set', 'maintenance_password': 'A classroom maintenance phrase!'}
+        self.assertEqual(self.api_req('POST', '/maintenance-password', urlencode(values))[0], 404)
+        self.assertEqual(self.control_req('POST', '/maintenance-password', urlencode(dict(values, csrf='wrong')))[0], 403)
+        self.assertIsNone(self.store.data.get('maintenance_credential'))
+        self.form('/maintenance-password', values)
+        status, _, body = self.maintenance_request()
+        self.assertEqual(status, 200)
+        decision = json.loads(body)
+        self.assertEqual(decision['action'], 'install')
+        self.assertEqual(decision['nonce'], 'c'*64)
+        self.assertEqual(decision['device_id'], '')
+        self.assertEqual(decision['expires_at'] - decision['authorized_at'], 120)
+        self.assertTrue(decision['authorized'])
+        self.assertNotIn('token', decision)
+        saved = self.store.path.read_text('utf-8')
+        self.assertNotIn(values['maintenance_password'], saved)
+        self.assertEqual(len(self.store.data['maintenance_events']), 1)
+        self.assertEqual(Store(self.store.path).data['maintenance_credential'], self.store.data['maintenance_credential'])
+        # No maintenance login is added to everyday control or device registration.
+        self.form('/policy', {'csrf': self.csrf(), 'domains': '', 'names': '', 'hashes': ''})
+        self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps({
+            'id': 'Q'*24, 'key': 'W'*32, 'name': 'fresh-clone'}))[0], 201)
+        _, _, installer = self.control_req('GET', '/school-installer', raw=True)
+        self.assertNotIn(values['maintenance_password'].encode(), installer)
+        self.assertNotIn(self.store.data['maintenance_credential']['digest'].encode(), installer)
+        self.form('/maintenance-password', {'csrf': self.csrf(), 'action': 'clear'})
+        self.assertEqual(self.maintenance_request()[0], 403)
+
+    def test_uninstall_requires_device_key_but_not_current_approval(self):
+        self.store.set_maintenance_password('A classroom maintenance phrase!')
+        self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps({
+            'id': 'Q'*24, 'key': 'W'*32, 'name': 'pending-device'}))[0], 201)
+        auth = {'X-Ohno-Device': 'Q'*24, 'X-Ohno-Key': 'W'*32}
+        self.assertEqual(self.maintenance_request(action='uninstall')[0], 403)
+        self.assertEqual(self.maintenance_request(action='uninstall', auth=dict(auth, **{'X-Ohno-Key': 'wrong'}))[0], 403)
+        status, _, body = self.maintenance_request(action='uninstall', auth=auth)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['device_id'], 'Q'*24)
+        self.assertFalse(self.store.data['devices']['Q'*24]['approved'])
+
+    def test_maintenance_password_is_not_classroom_pin(self):
+        self.store.set_maintenance_password('A classroom maintenance phrase!')
+        self.store.set_unlock_pin('2468')
+        auth = self.approved_device()
+        self.assertEqual(self.maintenance_request(password='2468')[0], 403)
+        self.assertEqual(self.api_req('POST', '/api/device/unlock',
+            json.dumps({'pin': 'A classroom maintenance phrase!'}), auth)[0], 400)
+        self.assertEqual(self.api_req('POST', '/api/device/unlock', json.dumps({'pin': '2468'}), auth)[0], 201)
+        self.assertEqual(self.maintenance_request()[0], 200)
+
+    def test_maintenance_state_failure_does_not_grant_or_rotate(self):
+        self.store.set_maintenance_password('A classroom maintenance phrase!')
+        original = self.store.path.read_bytes()
+        with patch('server.os.replace', side_effect=OSError('disk full')):
+            self.assertEqual(self.maintenance_request()[0], 503)
+            self.assertEqual(self.control_req('POST', '/maintenance-password', urlencode({
+                'csrf': self.csrf(), 'action': 'set', 'maintenance_password': 'A different classroom phrase!'}))[0], 503)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        self.assertEqual(self.store.data, json.loads(original))
+        self.assertEqual(self.maintenance_request(password='A different classroom phrase!')[0], 403)
+        self.assertEqual(self.maintenance_request()[0], 200)
+
+    def test_maintenance_rotation_during_verification_invalidates_result(self):
+        self.store.set_maintenance_password('A classroom maintenance phrase!')
+        def verify_then_disable(*args):
+            self.store.set_maintenance_password(None)
+            return True
+        with patch.object(self.store.maintenance_guard, 'verify', side_effect=verify_then_disable):
+            self.assertEqual(self.maintenance_request()[0], 403)
+        self.assertNotIn('maintenance_events', self.store.data)
+
+    def test_invalid_maintenance_requests_are_rejected(self):
+        valid = {'action': 'install', 'nonce': 'c'*64, 'maintenance_password': 'A classroom maintenance phrase!'}
+        for item in [dict(valid, action='update'), dict(valid, nonce='short'), dict(valid, maintenance_password=1),
+                     dict(valid, extra='ignored'), {'action': 'install'}]:
+            with self.subTest(item=item):
+                self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', json.dumps(item))[0], 400)
+        raw = json.dumps(valid)
+        for malformed in [raw[:-1] + ',"action":"install"}',
+                          raw[:-1] + ',"\\u0061ction":"uninstall"}',
+                          raw.encode('utf-16'), raw+' '*2048]:
+            self.assertEqual(self.api_req('POST', '/api/maintenance/authorize', malformed)[0], 400)
+        self.store.set_maintenance_password('A classroom maintenance phrase!')
+        self.assertEqual(self.maintenance_request(password='a'*12+'\ud800')[0], 403)
+        self.store.data['maintenance_credential'] = 'corrupt record'
+        self.assertEqual(self.maintenance_request()[0], 403)
+
     def test_invalid_unicode_does_not_poison_device_state(self):
         payload = {'id': 'X'*24, 'key': 'Y'*32, 'name': '\ud800'}
         self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps(payload))[0], 400)

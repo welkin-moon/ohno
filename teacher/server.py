@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
 from school_installer import HOSTNAME, build_school_installer, enrollment_origin
+from maintenance import MaintenanceGuard, create_credential, parse_authorization_request
 
 MAX_BODY = 65536
 MAX_REQUESTS = 10000
@@ -73,6 +74,7 @@ class Store:
         self.path = Path(path)
         self.lock = threading.RLock()
         self.attempts = {}
+        self.maintenance_guard = MaintenanceGuard()
         self._committed = self.path.read_text('utf-8')
         self.data = json.loads(self._committed)
         if self.data.get('version') != 1:
@@ -179,6 +181,38 @@ class Store:
             self.attempts.pop(address, None)
             return True
 
+    def set_maintenance_password(self, password):
+        # Expensive hashing is outside the policy/state lock. Only this salted
+        # server-side record is persisted; never copy it into a client image.
+        credential = create_credential(password) if password is not None else None
+        with self.lock:
+            self.data['maintenance_credential'] = credential
+            self.save()
+
+    def authorize_maintenance(self, password, source, action, nonce, dev_id='', key=''):
+        if action not in ('install', 'uninstall') or not isinstance(nonce, str) or not HASH.fullmatch(nonce):
+            return None
+        with self.lock:
+            credential = self.data.get('maintenance_credential')
+            credential = dict(credential) if isinstance(credential, dict) else None
+            if action == 'uninstall' and not self.device(dev_id, key, require_approved=False):
+                return None
+        if not self.maintenance_guard.verify(password, credential, source):
+            return None
+        with self.lock:
+            # Rotation/disable during a slow hash must invalidate that result.
+            if self.data.get('maintenance_credential') != credential:
+                return None
+            if action == 'uninstall' and not self.device(dev_id, key, require_approved=False):
+                return None
+            now = int(time.time())
+            event = {'action': action, 'nonce': nonce, 'device_id': dev_id if action == 'uninstall' else '',
+                     'authorized_at': now, 'expires_at': now + 120}
+            self.data['maintenance_events'] = (self.data.get('maintenance_events', []) + [event])[-100:]
+            # No authorization is returned if its audit record cannot persist.
+            self.save()
+            return dict(event)
+
     def device(self, dev_id, key, require_approved=True):
         with self.lock:
             dev = self.data['devices'].get(dev_id)
@@ -269,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ''
 
     def log_message(self, fmt, *args):
-        # Device keys, PINs and policy contents must never enter logs.
+        # Device keys, maintenance passwords, PINs and policy contents must never enter logs.
         pass
 
     @property
@@ -363,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             block_local_files = data.get('block_local_files', False)
             revision = data['policy_revision']
             pin_enabled = bool(data.get('unlock_pin_hash'))
+            maintenance_enabled = bool(data.get('maintenance_credential'))
         hidden = '<input type="hidden" name="csrf" value="' + esc(csrf) + '">'
         rows = []
         for dev_id, dev in devices:
@@ -397,6 +432,7 @@ class Handler(BaseHTTPRequestHandler):
                 action = '<form method="post" action="/request">' + hidden + '<input type="hidden" name="id" value="' + esc(item['id']) + '"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>'
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>仅本机可管理 · 策略版本 ' + str(revision) + '</p>'
+        content += '<section><h2>教师维护密码（客户端接入开发中）</h2><p>仅用于新增安装 / 卸载授权，不是后台登录或课堂 PIN。镜像分发后的启动不重复输入。支持一句话式长口令，不要求大小写或符号组合。当前：<strong>' + ('已设置' if maintenance_enabled else '未设置，维护授权拒绝') + '</strong></p><p><small>当前安装器还未接入，设置此密码暂不会保护现有 alpha.6 安装 / 卸载。系统管理员仍可进行标准 Windows 恢复。</small></p><form method="post" action="/maintenance-password">' + hidden + '<input name="maintenance_password" type="password" aria-label="教师维护密码" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12–128 字符的维护密码"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear" formnovalidate>停用维护授权</button></form></section>'
         content += '<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；后台管理仅在教师机本地开放并免登录。当前：<strong>' + ('已启用' if pin_enabled else '关闭') + '</strong></p><form method="post" action="/unlock-pin">' + hidden + '<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>'
         content += '<section><h2>网站与程序规则</h2><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件</label></p><button>保存规则</button></form></section>'
         if getattr(self.server, 'school_installer_exe', None) and getattr(self.server, 'enrollment_origin', None):
@@ -409,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return self._do_post()
         except StateSaveError:
-            if self.path.startswith('/api/device/'):
+            if self.path.startswith('/api/'):
                 return self.json_reply(503, {'error': 'state unavailable; retry later'})
             return self.reply(503, '保存失败，修改未生效。请检查磁盘和文件权限后重试。')
 
@@ -417,14 +453,16 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.read_body()
         if raw is None:
             return self.reply(413, 'Invalid request length')
-        if self.path.startswith('/api/device/'):
+        if self.path.startswith('/api/device/') or self.path == '/api/maintenance/authorize':
             if getattr(self.server, 'control', False):
                 return self.reply(404, 'Not found')
             try:
-                data = json.loads(raw)
+                data = parse_authorization_request(raw) if self.path == '/api/maintenance/authorize' else json.loads(raw)
                 if not isinstance(data, dict): raise ValueError()
             except (ValueError, UnicodeError, RecursionError):
                 return self.json_reply(400, {'error': 'invalid JSON'})
+            if self.path == '/api/maintenance/authorize':
+                return self.maintenance_authorization(data)
             if self.path == '/api/device/register':
                 return self.register(data)
             if self.path == '/api/device/request':
@@ -441,6 +479,14 @@ class Handler(BaseHTTPRequestHandler):
         one = lambda key: form.get(key, [''])[0]
         if not hmac.compare_digest(self.server.control_csrf.encode('utf-8'), one('csrf').encode('utf-8')):
             return self.reply(403, 'Invalid CSRF token')
+        if self.path == '/maintenance-password':
+            if one('action') not in ('set', 'clear'):
+                return self.reply(400, 'Invalid maintenance action')
+            try:
+                self.store.set_maintenance_password(one('maintenance_password') if one('action') == 'set' else None)
+            except ValueError:
+                return self.reply(400, 'Maintenance password must be 12-128 printable characters')
+            return self.redirect('/')
         if self.path == '/unlock-pin':
             action = one('action')
             if action == 'clear':
@@ -489,6 +535,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404, 'Not found')
             self.store.save()
         return self.redirect('/')
+
+    def maintenance_authorization(self, data):
+        # This response is a nonce-bound online decision, not a bearer token.
+        # New installers must verify TLS, compare action/nonce/device/expiry and
+        # use it immediately; existing clients do not call this endpoint yet.
+        if (set(data) != {'action', 'nonce', 'maintenance_password'} or
+                data.get('action') not in ('install', 'uninstall') or
+                not isinstance(data.get('nonce'), str) or not HASH.fullmatch(data['nonce']) or
+                not isinstance(data.get('maintenance_password'), str)):
+            return self.json_reply(400, {'error': 'invalid maintenance request'})
+        event = self.store.authorize_maintenance(data['maintenance_password'], self.client_address[0],
+            data['action'], data['nonce'], self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', ''))
+        if event is None:
+            return self.json_reply(403, {'error': 'maintenance authorization denied or temporarily unavailable'})
+        return self.json_reply(200, dict(event, authorized=True))
 
     def register(self, data):
         dev_id, key, name = data.get('id'), data.get('key'), data.get('name')
