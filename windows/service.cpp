@@ -1,9 +1,11 @@
-// Windows service lifecycle scaffold. No network enforcement is implemented.
+// Standard SCM host. Managed payload layout is explicit; no silent migration.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdio>
 #include <cwchar>
 #include "agent.hpp"
+#include "update_runtime.hpp"
+#include "update_configuration.hpp"
 namespace {
 constexpr wchar_t service_name[] = L"OhnoPrototype";
 SERVICE_STATUS_HANDLE status_handle = nullptr;
@@ -21,7 +23,7 @@ void report(DWORD state, DWORD code = NO_ERROR, DWORD hint = 0) {
 }
 DWORD WINAPI control(DWORD command, DWORD, LPVOID, LPVOID) {
     if (command == SERVICE_CONTROL_STOP || command == SERVICE_CONTROL_SHUTDOWN) {
-        report(SERVICE_STOP_PENDING, NO_ERROR, 3000);
+        report(SERVICE_STOP_PENDING, NO_ERROR, 15000);
         if (stop_event) SetEvent(stop_event);
         return NO_ERROR;
     }
@@ -34,10 +36,23 @@ void WINAPI service_main(DWORD, LPWSTR*) {
     stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!stop_event) { report(SERVICE_STOPPED, GetLastError()); return; }
     report(SERVICE_RUNNING);
-    run_agent(stop_event);
+    DWORD result=NO_ERROR;
+    try {
+        HKEY config=nullptr;DWORD layout=0,size=sizeof(layout),type=0;
+        if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&config)==ERROR_SUCCESS){
+            const auto queried=RegQueryValueExW(config,L"PayloadLayout",nullptr,&type,reinterpret_cast<BYTE*>(&layout),&size);
+            RegCloseKey(config);
+            if(queried==ERROR_FILE_NOT_FOUND)layout=0;
+            else if(queried!=ERROR_SUCCESS||type!=REG_DWORD||size!=sizeof(layout))throw std::runtime_error("corrupt installation layout");
+        }
+        if(layout==1)ohno::run_update_runtime(ohno::service_directory(),ohno::installed_release_key(),stop_event,ohno::installed_update_connection);
+        else if(layout==0)run_agent(stop_event); // existing installation, no automatic trust/layout upgrade
+        else throw std::runtime_error("unsupported installation layout");
+    }catch(...){OutputDebugStringW(L"ohno: worker/update host failed; standard service recovery remains available\n");result=ERROR_SERVICE_SPECIFIC_ERROR;}
+    if(WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0)result=NO_ERROR; // STOP must never invoke error recovery
     CloseHandle(stop_event);
     stop_event = nullptr;
-    report(SERVICE_STOPPED);
+    report(SERVICE_STOPPED,result);
 }
 }
 int wmain() {

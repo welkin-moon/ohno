@@ -17,3 +17,5 @@ approval-queue-test
 update-manifest-test
 update-transaction-test
 update-package-test
+
+/update-health-test

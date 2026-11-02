@@ -45,7 +45,7 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
           if not defined VSDIR exit /b 1
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\update_configuration.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
           if errorlevel 1 exit /b 1
@@ -68,6 +68,12 @@ jobs:
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_journal.cpp windows\update_journal.cpp /Fe:update-journal-test.exe
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_client.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-client-test.exe bcrypt.lib winhttp.lib crypt32.lib
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_worker_fixture.cpp /Fe:worker-fixture.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_runtime.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-runtime-test.exe bcrypt.lib winhttp.lib crypt32.lib
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_maintenance_client.cpp windows\maintenance_http.cpp /Fe:maintenance-client.exe winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
@@ -160,6 +166,9 @@ jobs:
       - name: Exercise native signed package pulling and interrupted staging
         shell: cmd
         run: python tests\windows_update_staging.py --client update-client-test.exe
+      - name: Exercise private workers, activation, rollback and STOP in temporary directories
+        shell: cmd
+        run: python tests\windows_update_runtime.py --client update-runtime-test.exe --worker worker-fixture.exe
       - name: Exercise native TLS and maintenance protocol adversaries
         shell: cmd
         run: python tests\windows_maintenance_transport.py --client maintenance-client.exe
