@@ -124,9 +124,17 @@ def main():
                         time.sleep(.1)
                     if not window:raise AssertionError('repeated password prompt did not appear')
                     user32.GetDlgItem.argtypes=[ctypes.c_void_p,ctypes.c_int];user32.GetDlgItem.restype=ctypes.c_void_p
-                    user32.SetWindowTextW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p]
+                    # Cross-process controls need WM_SETTEXT, not SetWindowText:
+                    # https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwindowtextw
+                    user32.SendMessageTimeoutW.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_size_t,
+                                                        ctypes.c_ssize_t,ctypes.c_uint,ctypes.c_uint,
+                                                        ctypes.POINTER(ctypes.c_size_t)]
+                    user32.SendMessageTimeoutW.restype=ctypes.c_ssize_t
                     edit=user32.GetDlgItem(window,201)
-                    if not edit or not user32.SetWindowTextW(edit,PASSWORD):raise AssertionError('password edit unavailable')
+                    value=ctypes.create_unicode_buffer(PASSWORD);reply=ctypes.c_size_t()
+                    if (not edit or not user32.SendMessageTimeoutW(edit,0x000C,0,ctypes.addressof(value),
+                                                                  3,5000,ctypes.byref(reply)) or not reply.value):
+                        raise AssertionError('password edit unavailable')
                     user32.PostMessageW(window,0x0111,1,0);user32.PostMessageW(window,0x0111,1,0)  # WM_COMMAND/IDOK
                     if process.wait(timeout=35)!=1:raise AssertionError('mismatched nonce was not rejected after UI submission')
                 finally:
