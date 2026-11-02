@@ -1,4 +1,4 @@
-"""Ephemeral GitHub Windows runner only. Installs a test root and service, then removes both."""
+"""Ephemeral runner: new service needs no root import; simulate/clean one legacy fixture root."""
 import ctypes
 import hashlib
 import http.client
@@ -135,6 +135,17 @@ def install_fixture(installer):
         if process.poll() is None:
             process.kill();process.wait(timeout=5)
 
+
+def assert_no_root_import(thumb):
+    # Read-only checks: the installer must rely on its own public PEM pin,
+    # not turn the school certificate into trust for every application.
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno') as config:
+        try:winreg.QueryValueEx(config,'ImportedRootSha1')
+        except FileNotFoundError:pass
+        else:raise RuntimeError('new installer recorded a system root import')
+    if subprocess.run(['certutil','-store','Root',thumb],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:
+        raise RuntimeError('new installer added machine-wide certificate trust')
+
 def assert_removed(thumb):
     for path in [r'SOFTWARE\Ohno',r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype']:
         try:
@@ -151,7 +162,7 @@ def assert_removed(thumb):
 
 def main():
     global ctx
-    server=None;child=None;listener=None;stream=None;installed=False;root_installed=False
+    server=None;child=None;listener=None;stream=None;installed=False;certificate_cleanup_needed=False
     with tempfile.TemporaryDirectory() as temp:
         state=Path(temp)/'state.json'
         cert=Path(temp)/'test-cert.pem';key=Path(temp)/'test-key.pem'
@@ -176,8 +187,9 @@ def main():
             if rejected.returncode==0:raise RuntimeError('incorrect password installed service')
             if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:raise RuntimeError('denied install changed service state')
             # Cleanup covers even a partial/timeout authorized attempt.
-            installed=True;root_installed=True
+            installed=True;certificate_cleanup_needed=True
             install_fixture(school_setup)
+            assert_no_root_import(thumb)
             assert configured_recovery_flag()
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno') as config:
                 if winreg.QueryValueEx(config,'ReleasePublicKey')[0]!=release_public_key:raise RuntimeError('school release public key was not pinned at install')
@@ -364,6 +376,13 @@ def main():
             form('/maintenance-password',{'csrf':csrf,'action':'set','maintenance_password':maintenance_password})
             # Device revocation is not a trap preventing authorized removal.
             form('/device',{'csrf':csrf,'id':device,'approved':'0'})
+            # Compatibility fixture: only now simulate an old install's recorded
+            # self-signed root. All actual runtime/update traffic above already
+            # succeeded without machine-wide trust. This fresh key belongs only
+            # to the disposable runner and must be removed by legacy cleanup.
+            subprocess.run(['certutil','-addstore','Root',str(cert)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno',0,winreg.KEY_SET_VALUE) as config:
+                winreg.SetValueEx(config,'ImportedRootSha1',0,winreg.REG_BINARY,bytes.fromhex(thumb))
             # Exercise normal removal on a revoked device, then a fresh install
             # and explicit offline OS-administrator recovery. All fixture state
             # belongs to this ephemeral runner; no production instance is used.
@@ -374,6 +393,7 @@ def main():
             previous_devices=set(read()['devices'])
             installed=True
             install_fixture(school_setup)
+            assert_no_root_import(thumb)
             waitfor(lambda:set(read()['devices'])-previous_devices,90)
             server.terminate();server.wait(timeout=10);server=None
             offline=subprocess.run([str(setup),'--remove','--password-stdin'],
@@ -407,7 +427,7 @@ def main():
                 if subprocess.run(['certutil','-store','Root',thumb],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:cleanup_failed=True
             if server:
                 server.terminate();server.wait(timeout=10)
-            if root_installed:subprocess.run(['certutil','-delstore','Root',thumb],check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if certificate_cleanup_needed:subprocess.run(['certutil','-delstore','Root',thumb],check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             if cleanup_failed:raise RuntimeError('service or imported root cleanup failed')
 
 if __name__=='__main__':main()

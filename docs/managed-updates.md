@@ -55,7 +55,7 @@ JSON 必须恰好包含以下 10 个字段。任何未知或重复字段、浮�
 ### 第三阶段：原生安装 / 卸载入口
 
 - 新版 `ohno-setup.exe` / 学校专属包显示 Win32 密码框，支持关闭、取消和重新尝试。没有 .NET 依赖。教师密码不通过命令参数或环境变量传递；隔离自动化可显式使用 `--password-stdin` 读取一行 UTF-8。临时自有密码缓冲区使用后清零，密码不持久化。
-- `maintenance_http.cpp` 在**实际发送请求的同一 TLS 连接**先核实证书，后写入含密码 / 设备密钥的正文。提供学校公开证书时只容忍 unknown-CA，并要求完整叶证书 DER 精确匹配；域名、期限和用途验证仍生效。没有 pin 时使用正常系统信任链。授权前不导入根证书，不改文件、注册表或服务。
+- `maintenance_http.cpp` 在**实际发送请求的同一 TLS 连接**先核实证书，后写入含密码 / 设备密钥的正文。提供学校公开证书时只容忍 unknown-CA，并要求完整叶证书 DER 精确匹配；域名、期限和用途验证仍生效。没有 pin 时使用正常系统信任链。当前新安装全程不导入整机根证书；授权前不改文件、注册表或服务。
 - 只使用固定 HTTPS origin 与固定授权路径，禁止 HTTP、跳转、代理、Cookie、自动 Windows 凭据、HTTP 自动重发。最多尝试同主机两个 IP 地址（仅连接阶段）；5 秒网络超时，20 秒单次单调时钟截止；响应 2048 字节、Header 8192 字节上限。校验 action、随机 nonce、device ID、120 秒期限；允许 30 秒教师 / 客户端时钟偏差，不产生可离线复用许可。
 - 失败、断网、密码停用、证书错、nonce 错均拒绝且不开始系统变更。正确授权后才继续原有安装流程，并保存服务器地址与**公开**证书。学生机身份在服务首次运行时独立生成，镜像启动仍不弹安装密码框。
 - Windows 应用列表注册 `ohno-maintenance.exe --remove`；正常卸载在线验证教师密码和该设备密钥。待审批或撤销设备仍能正常授权卸载。服务尚未登记、教师失联或配置损坏时，**提权 OS 管理员**可显式运行 `ohno-setup.exe --admin-recovery-remove`，使用同一清理流程而不冒充教师授权。
@@ -290,3 +290,21 @@ SID in a restricted token, verifying administrator membership is false before
 calling the shared client. This exercises AU-only pipe access without creating an
 account or editing OS policy. It is a restricted-token transport test, not a claim
 that a separate standard-user desktop/OEM session was qualified.
+
+### Per-application trust, not a new machine root
+
+With all managed routes using the pre-body-trusted native transport, a new
+installation stores only the school public PEM pin and no longer imports it into
+LocalMachine Root. Installation, ordinary traffic, maintenance and updates must
+work against the self-signed fixture while its root-store entry is absent. This
+reduces privileged trust changes; no certificate validation is disabled, and
+hostname, time, usage and exact pin checks stay mandatory.
+
+Removal retains compatibility with an older install's explicit ImportedRootSha1
+record, deleting only that recorded certificate. It does not enumerate/delete
+unrelated trust, or rewrite existing installations merely because this code was
+merged. CI runs the full service/update chain without a root, then intentionally
+adds its own short-lived fixture root + old marker immediately before removal to
+exercise legacy cleanup; a second new install again must create no root/marker.
+Those compatibility mutations occur only in the disposable runner, not on any
+user/teacher/classroom machine.
