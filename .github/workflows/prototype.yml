@@ -80,6 +80,14 @@ jobs:
           if errorlevel 1 exit /b 1
           approval-queue-test.exe
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\update_manifest_test.cpp /Fe:update-manifest-test.exe
+          if errorlevel 1 exit /b 1
+          update-manifest-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_update_verify_test.cpp windows\update_verify.cpp /Fe:update-verify-test.exe bcrypt.lib
+          if errorlevel 1 exit /b 1
+          update-verify-test.exe
+          if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\json_test.cpp /Fe:json-test.exe
           if errorlevel 1 exit /b 1
           json-test.exe

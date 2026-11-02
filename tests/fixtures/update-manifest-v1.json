@@ -1,0 +1,16 @@
+{
+  "public_key": "047c6d3ccce3740869cee9e1a2203f073aa6aa09ba7f4870922dfe9e220202507f7a4f2093aa4cad093bb8d5594aec85d61d71920035855eaaefdc424adf14e68c",
+  "manifest": {
+    "schema": 1,
+    "platform": "windows-x64",
+    "sequence": 12,
+    "version": "0.2.0-alpha.1",
+    "min_updater": 1,
+    "issued_at": 1793610000,
+    "expires_at": 1793613600,
+    "size": 4096,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "signature": "d67f46d6e336d840cb4f444f80cec4e0e21fd539f8fde7eadc95c5337668cd45faa5e412b55222723da4b1bd1c29968b3f5df5abd2db0a2a7a75ed429c644d49"
+  },
+  "signing_bytes": "ohno-update-p256-sha256-v1\n1\nwindows-x64\n12\n0.2.0-alpha.1\n1\n1793610000\n1793613600\n4096\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+}
