@@ -284,3 +284,9 @@ website requests and PIN unlock, with retries only before a handle could open.
 No unknown response/possibly executed operation is replayed. This does not make
 the old synchronous GUI fully asynchronous; broader UI responsiveness remains a
 separate usability qualification.
+
+The real-service E2E pipe driver drops privileges and disables its administrator
+SID in a restricted token, verifying administrator membership is false before
+calling the shared client. This exercises AU-only pipe access without creating an
+account or editing OS policy. It is a restricted-token transport test, not a claim
+that a separate standard-user desktop/OEM session was qualified.
