@@ -249,8 +249,11 @@ def main():
                 # credentials, teacher state, passwords or command-line secrets.
                 print('UPDATE JOURNAL',json.dumps(journal()),flush=True)
                 print('UPDATE FILES',[(str(path.relative_to(installation)),path.stat().st_size) for path in installation.rglob('*') if path.is_file()],flush=True)
-                print(subprocess.run(['powershell','-NoProfile','-Command',
-                    "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\\OhnoPrototype\\*' } | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress"],capture_output=True,text=True).stdout,flush=True)
+                try:
+                    print(subprocess.run(['powershell','-NoProfile','-Command',
+                        "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\\OhnoPrototype\\*' } | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress"],capture_output=True,text=True,timeout=10).stdout,flush=True)
+                except subprocess.TimeoutExpired:
+                    print('UPDATE PROCESS DIAGNOSTIC TIMED OUT',flush=True)
             def wait_update(predicate,seconds):
                 try:return waitfor(predicate,seconds)
                 except Exception:
@@ -263,14 +266,17 @@ def main():
                 files={name:(root/(worker_name if name=='ohno-worker.exe' else name)).read_bytes() for name in FILES}
                 package=build_package(version,files)
                 # Real packages include the TUN engine, unlike tiny parser fixtures.
-                # Allow bounded time for the catalog's durable write and signature;
-                # this is not a retry of an uncertain approval.
+                # A slow runner committed an 83 MB package just after the old
+                # 60-second response cutoff. Bound this one attempt at 120s;
+                # never repeat an uncertain approval or weaken native deadlines.
+                approval_started=time.monotonic()
+                print('FIXTURE APPROVAL BEGIN',version,len(package),flush=True)
                 try:
-                    status,_,body=control_call('POST','/updates/approve',package,{'Content-Type':'application/octet-stream','X-Ohno-CSRF':csrf},timeout=60)
+                    status,_,body=control_call('POST','/updates/approve',package,{'Content-Type':'application/octet-stream','X-Ohno-CSRF':csrf},timeout=120)
                 except Exception:
                     update_diagnostics();raise
                 if status!=200:raise RuntimeError('fixture release approval failed: '+str(status)+' '+body)
-                print('Fixture package approved',version,len(package),body,flush=True)
+                print('Fixture package approved',version,len(package),body,'seconds',round(time.monotonic()-approval_started,2),flush=True)
                 return json.loads(body)
             publish('0.2.0')
             # Exercise the actual registry loader and native pinned offer path
