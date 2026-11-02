@@ -110,6 +110,31 @@ def request_window(expected):
         if process:api.CloseHandle(process)
         if launcher.poll() is None:launcher.kill();launcher.wait(timeout=5)
 
+
+def install_fixture(installer):
+    """One attempt, bounded separately from TLS authorization; never replay."""
+    command=[str(installer),'--install-bundled','--password-stdin']
+    started=time.monotonic()
+    process=subprocess.Popen(command,stdin=subprocess.PIPE,text=True)
+    try:
+        try:
+            process.communicate(maintenance_password+'\n',timeout=30)
+        except subprocess.TimeoutExpired:
+            # The 20-second TLS budget is not a whole-install budget: baseline
+            # archive/extracted bytes plus fixed recovery entry exceed 200 MB.
+            # Observe the same process, without retrying an uncertain install.
+            installation=Path(os.environ['ProgramFiles'])/'OhnoPrototype'
+            print('SLOW FIXTURE INSTALL FILES',[(str(path.relative_to(installation)),path.stat().st_size)
+                  for path in installation.rglob('*') if path.is_file()],flush=True)
+            print(subprocess.run(['sc.exe','query','OhnoPrototype'],capture_output=True,text=True).stdout,flush=True)
+            process.communicate(timeout=max(1,120-(time.monotonic()-started)))
+        if process.returncode:
+            raise RuntimeError('fixture install failed: '+str(process.returncode))
+        print('FIXTURE INSTALL SECONDS',round(time.monotonic()-started,2),flush=True)
+    finally:
+        if process.poll() is None:
+            process.kill();process.wait(timeout=5)
+
 def assert_removed(thumb):
     for path in [r'SOFTWARE\Ohno',r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype']:
         try:
@@ -150,8 +175,9 @@ def main():
                                     input='wrong classroom maintenance passphrase\n',text=True,timeout=30)
             if rejected.returncode==0:raise RuntimeError('incorrect password installed service')
             if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:raise RuntimeError('denied install changed service state')
-            subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
-                           input=maintenance_password+'\n',text=True,check=True,timeout=30);installed=True;root_installed=True
+            # Cleanup covers even a partial/timeout authorized attempt.
+            installed=True;root_installed=True
+            install_fixture(school_setup)
             assert configured_recovery_flag()
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno') as config:
                 if winreg.QueryValueEx(config,'ReleasePublicKey')[0]!=release_public_key:raise RuntimeError('school release public key was not pinned at install')
@@ -340,9 +366,8 @@ def main():
             installed=False
             assert_removed(thumb)
             previous_devices=set(read()['devices'])
-            subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
-                           input=maintenance_password+'\n',text=True,check=True,timeout=35)
             installed=True
+            install_fixture(school_setup)
             waitfor(lambda:set(read()['devices'])-previous_devices,90)
             server.terminate();server.wait(timeout=10);server=None
             offline=subprocess.run([str(setup),'--remove','--password-stdin'],
