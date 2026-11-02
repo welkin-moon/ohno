@@ -15,3 +15,4 @@ setup-bundle-test
 client-policy-test
 approval-queue-test
 update-manifest-test
+update-transaction-test
