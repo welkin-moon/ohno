@@ -5,6 +5,9 @@
 #include <shobjidl.h>
 #include <winhttp.h>
 #include <wincrypt.h>
+#include <bcrypt.h>
+#include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cwchar>
 #include <string>
@@ -12,13 +15,18 @@
 #include "browser_policy.hpp"
 #include "setup_bundle.hpp"
 #include "setup_ui.hpp"
+#include "maintenance_http.hpp"
 #pragma comment(lib,"advapi32.lib")
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"winhttp.lib")
 #pragma comment(lib,"crypt32.lib")
+#pragma comment(lib,"bcrypt.lib")
 namespace {
 constexpr wchar_t service_name[]=L"OhnoPrototype";
+constexpr wchar_t uninstall_key[]=L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OhnoPrototype";
+bool password_stdin=false,reboot_cleanup_pending=false,authorization_cancelled=false;
+struct secret_wide {std::wstring value;~secret_wide(){if(!value.empty())SecureZeroMemory(value.data(),value.size()*sizeof(wchar_t));}};
 struct sc {SC_HANDLE h=nullptr;~sc(){if(h)CloseServiceHandle(h);}};
 struct reg {HKEY h=nullptr;~reg(){if(h)RegCloseKey(h);}};
 std::wstring directory(){PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,0,nullptr,&raw)))return {};std::wstring p=raw;CoTaskMemFree(raw);return p+L"\\OhnoPrototype";}
@@ -42,13 +50,6 @@ bool import_root_context(PCCERT_CONTEXT certificate,HKEY config){
     }
     CertCloseStore(roots,0);
     return result;
-}
-bool import_root_certificate(const wchar_t* path,HKEY config){
-    DWORD encoding=0,content=0,format=0;PCCERT_CONTEXT certificate=nullptr;
-    if(!CryptQueryObject(CERT_QUERY_OBJECT_FILE,path,CERT_QUERY_CONTENT_FLAG_CERT,CERT_QUERY_FORMAT_FLAG_ALL,0,
-        &encoding,&content,&format,nullptr,nullptr,reinterpret_cast<const void**>(&certificate))||!certificate)return false;
-    bool result=import_root_context(certificate,config);
-    CertFreeCertificateContext(certificate);return result;
 }
 bool import_root_pem(const std::string& pem,HKEY config){
     DWORD der_length=0;
@@ -105,25 +106,92 @@ void remove_shortcut(const std::wstring& shortcut,const std::wstring& expected){
 std::wstring read_config_string(HKEY key,const wchar_t* name){
     DWORD type=0,size=0;if(RegQueryValueExW(key,name,nullptr,&type,nullptr,&size)!=ERROR_SUCCESS||type!=REG_SZ||size>65536||size<sizeof(wchar_t)||size%sizeof(wchar_t))return {};
     std::vector<wchar_t> value(size/sizeof(wchar_t)+1,0);
+    struct wipe_buffer {std::vector<wchar_t>& data;~wipe_buffer(){SecureZeroMemory(data.data(),data.size()*sizeof(wchar_t));}} wipe{value};
     if(RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(value.data()),&size)!=ERROR_SUCCESS||type!=REG_SZ||size%sizeof(wchar_t))return {};
     return std::wstring(value.data());
+}
+std::wstring module_path(){std::vector<wchar_t> name(32768);DWORD n=GetModuleFileNameW(nullptr,name.data(),static_cast<DWORD>(name.size()));return n&&n<name.size()?std::wstring(name.data(),n):L"";}
+bool write_config(HKEY key,const wchar_t* name,const std::wstring& value){return RegSetValueExW(key,name,0,REG_SZ,reinterpret_cast<const BYTE*>(value.c_str()),static_cast<DWORD>((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;}
+bool certificate_pem_from_file(const wchar_t* path,std::string& pem){
+    PCCERT_CONTEXT cert=nullptr;
+    if(!CryptQueryObject(CERT_QUERY_OBJECT_FILE,path,CERT_QUERY_CONTENT_FLAG_CERT,CERT_QUERY_FORMAT_FLAG_ALL,0,
+        nullptr,nullptr,nullptr,nullptr,nullptr,reinterpret_cast<const void**>(&cert))||!cert)return false;
+    DWORD size=0;bool ok=CryptBinaryToStringA(cert->pbCertEncoded,cert->cbCertEncoded,CRYPT_STRING_BASE64HEADER,nullptr,&size)!=FALSE&&size<=16384;
+    if(ok){pem.resize(size);ok=CryptBinaryToStringA(cert->pbCertEncoded,cert->cbCertEncoded,CRYPT_STRING_BASE64HEADER,pem.data(),&size)!=FALSE;if(ok){pem.resize(size);if(!pem.empty()&&pem.back()=='\0')pem.pop_back();}}
+    CertFreeCertificateContext(cert);return ok;
+}
+bool get_password(const std::wstring& server,bool uninstall,std::string& output){
+    if(password_stdin){
+        output.reserve(512); // avoid stale plaintext copies on string growth
+        HANDLE input=GetStdHandle(STD_INPUT_HANDLE);if(!input||input==INVALID_HANDLE_VALUE)return false;
+        char ch=0;DWORD count=0;bool line=false;
+        while(ReadFile(input,&ch,1,&count,nullptr)&&count){
+            if(ch=='\n'){line=true;break;}if(output.size()>=512)return false;output+=ch;
+        }
+        if(!output.empty()&&output.back()=='\r')output.pop_back();
+        return (line||count==0)&&!output.empty();
+    }
+    secret_wide entered;if(!ohno::prompt_maintenance_password(server,uninstall,entered.value))return false;
+    const int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,entered.value.data(),static_cast<int>(entered.value.size()),nullptr,0,nullptr,nullptr);
+    if(length<=0||length>512)return false;output.resize(static_cast<std::size_t>(length));
+    return WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,entered.value.data(),static_cast<int>(entered.value.size()),output.data(),length,nullptr,nullptr)!=0;
+}
+bool authorize(const std::wstring& server,const std::string& pem,bool uninstall){
+    ohno::MaintenanceRequest request;request.server=server;request.certificate_pem=pem;request.action=uninstall?"uninstall":"install";
+    // Owned password/device secret buffers are transient and wiped on this path.
+    struct wipe {ohno::MaintenanceRequest& r;~wipe(){if(!r.password.empty())SecureZeroMemory(r.password.data(),r.password.size());if(!r.device_key.empty())SecureZeroMemory(r.device_key.data(),r.device_key.size());}} cleanup{request};
+    if(uninstall){
+        reg identity;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,KEY_READ,&identity.h)!=ERROR_SUCCESS)return false;
+        secret_wide credentials;credentials.value=read_config_string(identity.h,L"Credentials");
+        const auto n=credentials.value.size();if(n<98||credentials.value[n-98]!=L':'||credentials.value[n-65]!=L':')return false;
+        for(std::size_t i=n-97;i<n;++i)if(i!=n-65&&!((credentials.value[i]>=L'0'&&credentials.value[i]<=L'9')||(credentials.value[i]>=L'a'&&credentials.value[i]<=L'f')))return false;
+        request.device_id.assign(credentials.value.begin()+static_cast<std::ptrdiff_t>(n-97),credentials.value.begin()+static_cast<std::ptrdiff_t>(n-65));
+        request.device_key.assign(credentials.value.begin()+static_cast<std::ptrdiff_t>(n-64),credentials.value.end());
+    }
+    unsigned char nonce[32]{};if(BCryptGenRandom(nullptr,nonce,sizeof(nonce),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0)return false;
+    constexpr char hex[]="0123456789abcdef";for(auto b:nonce){request.nonce+=hex[b>>4];request.nonce+=hex[b&15];}
+    if(!get_password(server,uninstall,request.password)){authorization_cancelled=!password_stdin;return false;}
+    const auto result=ohno::authorize_maintenance(request);
+    if(result!=ohno::MaintenanceResult::Authorized){std::fwprintf(stderr,L"Teacher maintenance authorization failed; no install/remove changes made.\n");return false;}
+    return true;
+}
+bool register_uninstaller(const std::wstring& dir,const std::wstring& executable,bool& created){
+    reg key;DWORD disposition=0;
+    if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,uninstall_key,0,nullptr,0,KEY_WRITE,nullptr,&key.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY)return false;
+    created=true;DWORD yes=1;
+    return write_config(key.h,L"DisplayName",L"Ohno classroom assistant")&&write_config(key.h,L"Publisher",L"Ohno")&&
+        write_config(key.h,L"InstallLocation",dir)&&write_config(key.h,L"UninstallString",L"\""+executable+L"\" --remove")&&
+        RegSetValueExW(key.h,L"NoModify",0,REG_DWORD,reinterpret_cast<const BYTE*>(&yes),sizeof(yes))==ERROR_SUCCESS&&
+        RegSetValueExW(key.h,L"NoRepair",0,REG_DWORD,reinterpret_cast<const BYTE*>(&yes),sizeof(yes))==ERROR_SUCCESS;
+}
+bool is_administrator(){
+    SID_IDENTIFIER_AUTHORITY authority=SECURITY_NT_AUTHORITY;PSID group=nullptr;BOOL member=FALSE;
+    if(!AllocateAndInitializeSid(&authority,2,SECURITY_BUILTIN_DOMAIN_RID,DOMAIN_ALIAS_RID_ADMINS,0,0,0,0,0,0,&group))return false;
+    const bool ok=CheckTokenMembership(nullptr,group,&member)!=FALSE;FreeSid(group);return ok&&member;
 }
 int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr){
     if(!valid_url(url)){std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
     sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)};if(!manager.h){std::fwprintf(stderr,L"Administrator access required (%lu)\n",GetLastError());return 1;}
     sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){std::fwprintf(stderr,L"Service already exists.\n");return 1;}
     reg prior;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&prior.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno registry key already exists.\n");return 1;}
+    reg prior_uninstall;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,uninstall_key,0,KEY_READ,&prior_uninstall.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno uninstall registration already exists.\n");return 1;}
+    std::string pem=embedded_pem?*embedded_pem:std::string{};
+    if(certificate_path&&!certificate_pem_from_file(certificate_path,pem)){std::fwprintf(stderr,L"Cannot read teacher public certificate.\n");return 1;}
+    if(!authorize(url,pem,false))return authorization_cancelled?2:1;
     std::wstring dir=directory();if(dir.empty()||!CreateDirectoryW(dir.c_str(),nullptr)){std::fwprintf(stderr,L"Cannot create program directory (%lu)\n",GetLastError());return 1;}
-    std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe",tun=dir+L"\\ohno-tun.exe",gpl=dir+L"\\sing-box-LICENSE.txt",wintun=dir+L"\\wintun-LICENSE.txt",shortcut;bool made_key=false;bool made_service=false;int result=1;
+    std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe",tun=dir+L"\\ohno-tun.exe",gpl=dir+L"\\sing-box-LICENSE.txt",wintun=dir+L"\\wintun-LICENSE.txt",shortcut;bool made_key=false;bool made_service=false;bool made_uninstaller=false;int result=1;
+    const std::wstring maintenance=dir+L"\\ohno-maintenance.exe";
     do{
-        if(!embedded_exe(exe,101)||!embedded_exe(helper,102)||!embedded_exe(tun,103)||!embedded_exe(gpl,105)||!embedded_exe(wintun,106)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
+        if(!CopyFileW(module_path().c_str(),maintenance.c_str(),TRUE)||!embedded_exe(exe,101)||!embedded_exe(helper,102)||!embedded_exe(tun,103)||!embedded_exe(gpl,105)||!embedded_exe(wintun,106)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
         reg config;DWORD disposition=0;
         if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,nullptr,0,KEY_WRITE,nullptr,&config.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY){std::fwprintf(stderr,L"Cannot create configuration.\n");break;}
         made_key=true;
         if(RegSetValueExW(config.h,L"ServerUrl",0,REG_SZ,reinterpret_cast<const BYTE*>(url),static_cast<DWORD>((wcslen(url)+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot write configuration.\n");break;}
+        if(!pem.empty()&&!write_config(config.h,L"TeacherCertificatePem",std::wstring(pem.begin(),pem.end()))){std::fwprintf(stderr,L"Cannot save public teacher certificate.\n");break;}
+        if(!register_uninstaller(dir,maintenance,made_uninstaller)){std::fwprintf(stderr,L"Cannot register uninstaller.\n");break;}
         if(!make_shortcut(helper,shortcut)){std::fwprintf(stderr,L"Cannot create request shortcut.\n");break;}
         if(!shortcut.empty()&&RegSetValueExW(config.h,L"Shortcut",0,REG_SZ,reinterpret_cast<const BYTE*>(shortcut.c_str()),static_cast<DWORD>((shortcut.size()+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot record request shortcut.\n");break;}
-        if((certificate_path&&!import_root_certificate(certificate_path,config.h))||(embedded_pem&&!import_root_pem(*embedded_pem,config.h))){std::fwprintf(stderr,L"Cannot import teacher certificate (%lu)\n",GetLastError());break;}
+        if(!pem.empty()&&!import_root_pem(pem,config.h)){std::fwprintf(stderr,L"Cannot import teacher certificate (%lu)\n",GetLastError());break;}
         std::wstring quoted=L"\""+exe+L"\"";
         sc svc{CreateServiceW(manager.h,service_name,L"ohno prototype",SERVICE_ALL_ACCESS,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,quoted.c_str(),nullptr,nullptr,nullptr,nullptr,nullptr)};
         if(!svc.h){std::fwprintf(stderr,L"Cannot register service (%lu)\n",GetLastError());break;}
@@ -134,20 +202,29 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         if(!StartServiceW(svc.h,0,nullptr)){std::fwprintf(stderr,L"Cannot start service (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
         std::wprintf(L"Prototype installed. Approve the device in the teacher UI.\n");result=0;
     }while(false);
-    if(result){if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());RemoveDirectoryW(dir.c_str());}
+    if(result){if(made_uninstaller)RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);DeleteFileW(maintenance.c_str());if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());RemoveDirectoryW(dir.c_str());}
     return result;
 }
-int remove(){
+int remove(bool administrator_recovery=false){
+    if(administrator_recovery&&!is_administrator()){std::fwprintf(stderr,L"Administrator recovery requires an elevated OS administrator.\n");return 1;}
     std::wstring dir=directory();if(dir.empty())return 1;
+    if(!administrator_recovery){
+        reg config;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&config.h)!=ERROR_SUCCESS)return 1;
+        const auto server=read_config_string(config.h,L"ServerUrl"),public_pem=read_config_string(config.h,L"TeacherCertificatePem");
+        if(server.empty()||!authorize(server,std::string(public_pem.begin(),public_pem.end()),true))return authorization_cancelled?2:1;
+    }else std::fwprintf(stderr,L"Explicit OS-administrator recovery removal; teacher authorization bypassed.\n");
     sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT)};if(!manager.h)return 1;
-    sc svc{OpenServiceW(manager.h,service_name,SERVICE_STOP|SERVICE_QUERY_STATUS|DELETE)};if(!svc.h){std::fwprintf(stderr,L"Service not found (%lu)\n",GetLastError());return 1;}
-    SERVICE_STATUS status{};ControlService(svc.h,SERVICE_CONTROL_STOP,&status);
-    for(int i=0;i<40;++i){if(!QueryServiceStatus(svc.h,&status))return 1;if(status.dwCurrentState==SERVICE_STOPPED)break;Sleep(500);}
-    if(status.dwCurrentState!=SERVICE_STOPPED){std::fwprintf(stderr,L"Service did not stop; no files removed.\n");return 1;}
+    sc svc{OpenServiceW(manager.h,service_name,SERVICE_STOP|SERVICE_QUERY_STATUS|DELETE)};
+    if(!svc.h&&(!administrator_recovery||GetLastError()!=ERROR_SERVICE_DOES_NOT_EXIST)){std::fwprintf(stderr,L"Cannot open service (%lu)\n",GetLastError());return 1;}
+    if(svc.h){
+        SERVICE_STATUS status{};ControlService(svc.h,SERVICE_CONTROL_STOP,&status);
+        for(int i=0;i<40;++i){if(!QueryServiceStatus(svc.h,&status))return 1;if(status.dwCurrentState==SERVICE_STOPPED)break;Sleep(500);}
+        if(status.dwCurrentState!=SERVICE_STOPPED){std::fwprintf(stderr,L"Service did not stop; no files removed.\n");return 1;}
+    }
     if(!clear_edge_policy()||!clear_edge_allow_policy()){std::fwprintf(stderr,L"Could not restore Edge URL policy; service retained.\n");return 1;}
     reg cfg;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS&&!remove_imported_certificate(cfg.h)){std::fwprintf(stderr,L"Could not remove imported teacher certificate; service retained.\n");return 1;}
     std::wstring shortcut=cfg.h?read_config_string(cfg.h,L"Shortcut"):L"";
-    if(!DeleteService(svc.h)){std::fwprintf(stderr,L"Cannot delete service (%lu)\n",GetLastError());return 1;}
+    if(svc.h&&!DeleteService(svc.h)){std::fwprintf(stderr,L"Cannot delete service (%lu)\n",GetLastError());return 1;}
     std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe";
     remove_shortcut(shortcut,helper);
     DeleteFileW((dir+L"\\ohno-tun.json").c_str());DeleteFileW((dir+L"\\ohno-tun.json.tmp").c_str());
@@ -155,25 +232,36 @@ int remove(){
     DeleteFileW((dir+L"\\ohno-tun.exe").c_str());
     if(!DeleteFileW(helper.c_str()))std::fwprintf(stderr,L"Could not remove request helper (%lu).\n",GetLastError());
     if(!DeleteFileW(exe.c_str()))std::fwprintf(stderr,L"Could not remove service executable (%lu); remove manually after reboot.\n",GetLastError());
+    const auto maintenance=dir+L"\\ohno-maintenance.exe";
+    if(!DeleteFileW(maintenance.c_str())&&GetLastError()!=ERROR_FILE_NOT_FOUND){
+        const auto self=module_path();
+        if(_wcsicmp(self.c_str(),maintenance.c_str())==0&&MoveFileExW(maintenance.c_str(),nullptr,MOVEFILE_DELAY_UNTIL_REBOOT))reboot_cleanup_pending=true;
+        else std::fwprintf(stderr,L"Could not remove maintenance executable; inspect manually.\n");
+    }
+    const auto removed_entry=RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);
+    if(removed_entry!=ERROR_SUCCESS&&removed_entry!=ERROR_FILE_NOT_FOUND)std::fwprintf(stderr,L"Could not remove uninstall registration; inspect manually.\n");
     if(!RemoveDirectoryW(dir.c_str()))std::fwprintf(stderr,L"Could not remove program folder (%lu); inspect manually.\n",GetLastError());
     if(RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno")!=ERROR_SUCCESS)std::fwprintf(stderr,L"Could not remove registry settings; inspect manually.\n");
     return 0;
 }
 }
 int wmain(int argc,wchar_t** argv){
+    std::vector<wchar_t*> args;args.push_back(argv[0]);
+    for(int i=1;i<argc;++i){if(std::wcscmp(argv[i],L"--password-stdin")==0){if(password_stdin)return 2;password_stdin=true;}else args.push_back(argv[i]);}
+    argc=static_cast<int>(args.size());argv=args.data();
     if(argc==1 || (argc==2&&std::wcscmp(argv[1],L"--install-bundled")==0)){
         ohno::SchoolBootstrap config;
         const auto result=ohno::read_school_bundle(config);
         if(result==ohno::BootstrapResult::Ready){
             const int code=install(config.server.c_str(),nullptr,&config.certificate_pem);
-            if(argc==1)MessageBoxW(nullptr,
+            if(argc==1&&!password_stdin&&code!=2)MessageBoxW(nullptr,
                 code==0?L"Ohno 已安装，服务已自动启动。请在教师端批准设备。":
                 L"Ohno 安装失败，请检查系统服务与程序目录，或联系学校 IT。",
                 L"Ohno 学生端",MB_OK|(code==0?MB_ICONINFORMATION:MB_ICONERROR));
             return code;
         }
         if(argc==2 || result==ohno::BootstrapResult::Invalid){
-            if(argc==1)MessageBoxW(nullptr,L"学校专属安装包配置损坏。请重新从教师端下载。",
+            if(argc==1&&!password_stdin)MessageBoxW(nullptr,L"学校专属安装包配置损坏。请重新从教师端下载。",
                 L"Ohno",MB_OK|MB_ICONERROR);
             return 1;
         }
@@ -184,7 +272,13 @@ int wmain(int argc,wchar_t** argv){
     }
     if(argc==3&&std::wcscmp(argv[1],L"--install")==0)return install(argv[2],nullptr);
     if(argc==5&&std::wcscmp(argv[1],L"--install")==0&&std::wcscmp(argv[3],L"--certificate")==0)return install(argv[2],argv[4]);
-    if(argc==2&&std::wcscmp(argv[1],L"--remove")==0)return remove();
-    std::fwprintf(stderr,L"Usage: double-click Ohno-School-Setup.exe, or --install HTTPS_ORIGIN [--certificate FILE], --remove\n");
+    if(argc==2&&std::wcscmp(argv[1],L"--remove")==0){
+        const int result=remove();
+        if(!password_stdin&&result!=2)MessageBoxW(nullptr,result==0?(reboot_cleanup_pending?L"Ohno 已卸载。维护器自身文件将在重启后清理。":L"Ohno 已卸载。"):
+            L"未能卸载。请检查教师维护密码、教师端网络和设备登记。学校 OS 管理员可使用明确的恢复移除命令。",L"Ohno",MB_OK|(result==0?MB_ICONINFORMATION:MB_ICONERROR));
+        return result;
+    }
+    if(argc==2&&!password_stdin&&std::wcscmp(argv[1],L"--admin-recovery-remove")==0)return remove(true);
+    std::fwprintf(stderr,L"Usage: double-click Ohno-School-Setup.exe, or --install HTTPS_ORIGIN [--certificate FILE] [--password-stdin], --remove [--password-stdin], --admin-recovery-remove\n");
     return 2;
 }

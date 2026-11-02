@@ -34,11 +34,16 @@ def parse_authorization_request(raw):
         data = json.loads(raw.decode('utf-8'), object_pairs_hook=unique)
     except (UnicodeError, RecursionError) as error:
         raise ValueError('Invalid maintenance JSON') from error
-    if (not isinstance(data, dict) or set(data) != {'action', 'nonce', 'maintenance_password'} or
-            data.get('action') not in ('install', 'uninstall') or
+    basic = {'action', 'nonce', 'maintenance_password'}
+    device_fields = {'device_id', 'device_key'}
+    if (not isinstance(data, dict) or data.get('action') not in ('install', 'uninstall') or
+            set(data) not in (basic, basic | device_fields) or
+            (set(data) != basic and data['action'] != 'uninstall') or
             not isinstance(data.get('nonce'), str) or not DIGEST.fullmatch(data['nonce']) or
             not isinstance(data.get('maintenance_password'), str)):
         raise ValueError('Invalid maintenance request')
+    if set(data) != basic and any(not isinstance(data[name], str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', data[name]) for name in device_fields):
+        raise ValueError('Invalid maintenance device identity')
     return data
 
 
