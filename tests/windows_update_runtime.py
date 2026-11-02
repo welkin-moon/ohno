@@ -45,7 +45,7 @@ def main():
         baseline=root/'baseline.ohno';baseline.write_bytes(package('0.1.0'))
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'cert.pem',root/'tls.key')
         with ThreadingHTTPServer(('127.0.0.1',0),Handler) as server:
-            server.socket=context.wrap_socket(server.socket,server_side=True);server.origin='https://localhost:'+str(server.server_port)
+            server.socket=context.wrap_socket(server.socket,server_side=True);server.origin='https://127.0.0.1:'+str(server.server_port)
             server.requests=[];server.mode='normal';thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             def offer(version='0.2.0',seq=7,mode='normal'):
                 payload=package(version);now=int(time.time());server.mode=mode;server.package=payload

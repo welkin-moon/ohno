@@ -76,7 +76,7 @@ def main():
             'issued_at':now,'expires_at':now+3600,'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest()},release)
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'cert.pem',root/'key.pem')
         with ThreadingHTTPServer(('127.0.0.1',0),Handler) as server:
-            server.socket=context.wrap_socket(server.socket,server_side=True);server.origin='https://localhost:'+str(server.server_port)
+            server.socket=context.wrap_socket(server.socket,server_side=True);server.origin='https://127.0.0.1:'+str(server.server_port)
             server.offer=manifest;server.package=payload;server.mode='normal';server.requests=[]
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             def invoke(directory,mode='fetch',expected=0,initialize=True,**overrides):

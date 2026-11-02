@@ -185,19 +185,32 @@ def main():
             # immutable packages, normal commit, then unhealthy candidate rollback.
             installation=Path(os.environ['ProgramFiles'])/'OhnoPrototype'
             def journal():return json.loads((installation/'update-state.json').read_text())
+            def update_diagnostics():
+                # Public package/journal metadata only, never device registry
+                # credentials, teacher state, passwords or command-line secrets.
+                print('UPDATE JOURNAL',json.dumps(journal()),flush=True)
+                print('UPDATE FILES',[(str(path.relative_to(installation)),path.stat().st_size) for path in installation.rglob('*') if path.is_file()],flush=True)
+                print(subprocess.run(['powershell','-NoProfile','-Command',
+                    "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\\OhnoPrototype\\*' } | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress"],capture_output=True,text=True).stdout,flush=True)
+            def wait_update(predicate,seconds):
+                try:return waitfor(predicate,seconds)
+                except Exception:
+                    update_diagnostics();raise
+
             baseline=journal()['active'];assert baseline['sequence']==0
             def publish(version,worker_name='ohno-worker.exe'):
                 files={name:(root/(worker_name if name=='ohno-worker.exe' else name)).read_bytes() for name in FILES}
                 package=build_package(version,files)
                 status,_,body=control_call('POST','/updates/approve',package,{'Content-Type':'application/octet-stream','X-Ohno-CSRF':csrf})
                 if status!=200:raise RuntimeError('fixture release approval failed: '+str(status)+' '+body)
+                print('Fixture package approved',version,len(package),body,flush=True)
                 return json.loads(body)
             publish('0.2.0')
-            good=waitfor(lambda:journal() if journal()['phase']=='stable' and journal()['active']['sequence']==1 else None,180)
+            good=wait_update(lambda:journal() if journal()['phase']=='stable' and journal()['active']['sequence']==1 else None,180)
             assert good['active']['version']=='0.2.0' and good['high_water']==1
             assert device in read()['devices'] and read()['devices'][device]['bound_mac']==first_mac
             publish('0.2.1-nohealth','worker-fixture.exe')
-            rolled=waitfor(lambda:journal() if journal()['phase']=='stable' and journal()['high_water']==2 else None,180)
+            rolled=wait_update(lambda:journal() if journal()['phase']=='stable' and journal()['high_water']==2 else None,180)
             assert rolled['active']==good['active'] and rolled['last_good']==good['active']
             # Ensure failed sequence does not retry and production pipe returned.
             waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-update.example'],stdout=subprocess.DEVNULL).returncode==0,90)
