@@ -109,6 +109,54 @@ class TeacherIntegration(unittest.TestCase):
         with socket.create_connection(('127.0.0.1', self.api.server_port), timeout=5):
             self.assertEqual(self.api_req('GET', '/health')[0], 200)
 
+    def test_connection_limit_and_idle_timeout_release_worker(self):
+        started, released = threading.Event(), threading.Event()
+        class TrackedHandler(Handler):
+            def setup(self):
+                super().setup()
+                started.set()
+        class TrackedServer(TeacherHTTPServer):
+            def process_request_thread(self, *args):
+                try:
+                    super().process_request_thread(*args)
+                finally:
+                    released.set()
+        with TrackedServer(('127.0.0.1', 0), TrackedHandler, max_workers=1) as server:
+            server.request_timeout = 2
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                address = server.server_address
+                with socket.create_connection(address, timeout=5) as idle:
+                    self.assertTrue(started.wait(5))
+                    with socket.create_connection(address, timeout=5) as rejected:
+                        try:
+                            self.assertEqual(rejected.recv(1), b'')
+                        except ConnectionResetError:
+                            pass
+                    self.assertEqual(idle.recv(1), b'')
+                self.assertTrue(released.wait(5))
+                connection = http.client.HTTPConnection(*address, timeout=5)
+                try:
+                    connection.request('GET', '/health')
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    response.read()
+                finally:
+                    connection.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_truncated_body_and_deep_json_are_rejected(self):
+        with socket.create_connection(('127.0.0.1', self.control.server_port), timeout=5) as peer:
+            peer.sendall(b'POST /policy HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 10\r\n\r\nxx')
+            peer.shutdown(socket.SHUT_WR)
+            with peer.makefile('rb') as response:
+                self.assertIn(b' 413 ', response.readline())
+        self.assertEqual(self.api_req('POST', '/api/device/register',
+            '['*2000 + '0' + ']'*2000)[0], 400)
+
     def test_control_bind_failure_releases_api_port(self):
         created = []
         def make_server(*args, **kwargs):
