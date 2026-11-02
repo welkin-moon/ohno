@@ -123,6 +123,19 @@ class UpdateManifestTests(unittest.TestCase):
             with self.subTest(document=str(document)[:40]), self.assertRaises(ValueError):
                 parse_manifest(document)
 
+    def test_string_limit_counts_utf8_bytes_and_rejects_surrogates(self):
+        # Unsupported extra fields must still hit the byte limit first, exactly
+        # like the native UTF-8 parser; len(str) alone undercounts this input.
+        document = '{"extra":"' + '界'*1400 + '"}'
+        self.assertLess(len(document), 4096)
+        self.assertGreater(len(document.encode('utf-8')), 4096)
+        with self.assertRaisesRegex(ValueError, 'document size'):
+            parse_manifest(document)
+        with self.assertRaisesRegex(ValueError, 'document size'):
+            parse_manifest(document.encode('utf-8'))
+        with self.assertRaisesRegex(ValueError, 'UTF-8'):
+            parse_manifest('"\ud800"')
+
     def test_signing_rejects_non_p256_key(self):
         with self.assertRaises(ValueError):
             sign_manifest(self.fields, ec.generate_private_key(ec.SECP384R1()))

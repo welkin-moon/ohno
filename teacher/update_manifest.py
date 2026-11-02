@@ -81,7 +81,13 @@ def sign_manifest(fields: dict, key: ec.EllipticCurvePrivateKey) -> dict:
 
 
 def parse_manifest(document: str | bytes) -> dict:
-    if not isinstance(document, (str, bytes)) or len(document) > MAX_DOCUMENT_SIZE:
+    if not isinstance(document, (str, bytes)):
+        raise ValueError('invalid update document type')
+    try:
+        wire_size = len(document.encode('utf-8')) if isinstance(document, str) else len(document)
+    except UnicodeError as error:
+        raise ValueError('invalid update UTF-8') from error
+    if wire_size > MAX_DOCUMENT_SIZE:
         raise ValueError('invalid update document size')
     def unique(pairs):
         result = {}
