@@ -21,6 +21,9 @@ UpdateRevision stage_initial_payload(WindowsUpdateJournal& storage,std::string_v
 // Revalidates already-installed bytes against journal identity and (for seq>0)
 // installed school key. Expiry is not reapplied to a previously committed build.
 // Does not authorize new updates or execute anything.
+// Read-only launcher variant pins the trusted root without taking writer lock.
+void verify_staged_payload(const std::wstring& trusted_root,const UpdateRevision& revision,
+    const std::string& pinned_key,HANDLE stop_event=nullptr);
 void verify_staged_payload(WindowsUpdateJournal& storage,const UpdateRevision& revision,
     const std::string& pinned_key,HANDLE stop_event=nullptr);
 }

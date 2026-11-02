@@ -27,9 +27,15 @@ jobs:
         run: python tests/update_package_parity.py --client ./update-package-test
   windows-build:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install teacher test dependencies
+        shell: cmd
+        run: python -m pip install -r teacher/requirements.txt
       - name: Fetch pinned TUN engine
         shell: pwsh
         run: |
@@ -88,9 +94,19 @@ jobs:
           tun-config.exe > generated-tun.json
           ohno-tun.exe check -c generated-tun.json
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_payload.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp /Fe:installed-payload-test.exe bcrypt.lib
+          if errorlevel 1 exit /b 1
+          rc /fo maintenance.res windows\maintenance.rc
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE /DOHNO_PAYLOAD_MAINTENANCE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp maintenance.res /Fe:ohno-maintenance.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_launcher.cpp windows\update_configuration.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp /Fe:ohno-request-launcher.exe advapi32.lib user32.lib bcrypt.lib /link /SUBSYSTEM:WINDOWS
+          if errorlevel 1 exit /b 1
+          for /f %%v in (VERSION) do python teacher\update_package.py --version %%v --directory . --output ohno-initial.ohno
+          if errorlevel 1 exit /b 1
           rc /fo setup.res windows\setup.rc
           if errorlevel 1 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
           if errorlevel 1 exit /b 1
           cl /std:c++17 /EHsc /W4 /MT /Isrc tests\policy_test.cpp src\policy.cpp /Fe:policy-test.exe
           if errorlevel 1 exit /b 1
@@ -148,12 +164,7 @@ jobs:
           path: |
             ohno-service-prototype.exe
             ohno-setup.exe
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install teacher test dependencies
-        shell: cmd
-        run: python -m pip install -r teacher/requirements.txt
+            ohno-initial.ohno
       - name: Test teacher release catalog and private fixture-directory permissions
         shell: cmd
         run: python -m unittest discover -s teacher -p "test_update_*.py" -v
@@ -169,6 +180,9 @@ jobs:
       - name: Exercise private workers, activation, rollback and STOP in temporary directories
         shell: cmd
         run: python tests\windows_update_runtime.py --client update-runtime-test.exe --worker worker-fixture.exe
+      - name: Verify read-only selectors and conservative payload removal
+        shell: cmd
+        run: python tests\windows_installed_payload.py --client installed-payload-test.exe
       - name: Exercise native TLS and maintenance protocol adversaries
         shell: cmd
         run: python tests\windows_maintenance_transport.py --client maintenance-client.exe

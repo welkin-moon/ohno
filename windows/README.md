@@ -8,11 +8,7 @@
 
 `service.cpp` 是原生 Win32 单服务的生命周期骨架：接收 SCM 启动、停止和关机消息。目前支持向教师端注册和轮询规则，仅有按文件名或哈希定期扫描并尝试终止进程的试验性拦截（并非启动前拦截），支持可选 4–8 位课堂 PIN 的临时解锁；安装和服务崩溃恢复仍为试验性实现，也不能作为成品部署。
 
-在仓库根目录的 Visual Studio x64 开发者命令行中，使用 Windows SDK 编译：
-
-```
-cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
-```
+构建命令与顺序以 [Windows CI 工作流](../.github/workflows/prototype.yml) 为准：先构建固定 SCM 宿主、worker、请求界面和纯维护载荷，再用 `teacher/update_package.py` 生成初始固定格式包，最后将包与固定请求启动器嵌入单文件安装器。构建机需要 Python；学生机运行时不需要 Python、.NET 或额外 VC++ 组件。
 
 构建需要编译器及 SDK，成品运行时按 `/MT` 静态链接 C/C++ 运行库，不需要另装 .NET 或 Visual C++ 再发行包。精简系统可能缺失 Windows 自身的基础组件，必须通过实机检查和测试。
 
@@ -47,3 +43,13 @@ TUN 使用随安装包携带的 sing-box 1.14.4（含 Wintun），由唯一 Wind
 授权请求在同一实际 TLS 连接核实学校证书后才发送密码，拒绝跳转 / 自动凭据 / 代理；证书错误、断网、错误密码或停用授权均不开始系统变更。无需重复登录教师后台，不将教师密码写入安装包、镜像、注册表或日志。`--password-stdin` 仅供受控自动化读取一行 UTF-8，不能把密码放到命令参数。
 
 正常卸载要求该机器已向教师端登记，使用设备密钥与教师维护密码共同授权；设备撤销审批不会阻止卸载。故障 / 离线恢复时，提权 Windows 管理员可显式运行 `ohno-setup.exe --admin-recovery-remove`。此标准恢复通道不依赖教师端，不意味着能抵抗 OS 管理员绕过。应用列表卸载维护器自身可能需重启才能删除自身文件，程序会提示检查剩余目录。维护授权不等于已经实现自动升级，详见 [托管升级进展](../docs/managed-updates.md)。
+
+## 源码中的受管升级布局
+
+新的安装器在教师在线授权后才创建管理员/SYSTEM 可写、普通用户只读执行的程序目录，安装单一 SCM 服务和初始 `versions/0-<sha256>` 载荷，持久化 selector，再启动服务。固定宿主和恢复卸载入口不在自动覆盖范围；可替换 worker、请求 UI、TUN 载荷置于独立不可原地覆盖的版本目录。请求启动器读取 last-good 并验完整包；未提交的候选不会替换日常请求 UI。
+
+教师先在本地 Web 端初始化发行信任，再下载学校专属安装器，才能将公开发行 key 固定在镜像中。旧版或没有发行 key 的通用安装不会自动接受服务端临时提供的 key；不会为了开启升级而共享教师密码或设备私钥。镜像克隆沿用硬件锚自动重建设备身份，日常策略与升级无需维护密码。
+
+更新依次走签名/哈希/架构验证、完整暂存、在线设备授权、持久事务、真实 worker 健康提交；失败保留最后正常版本和高水位。服务通过 Windows 标准 recovery 恢复进程崩溃；报告的非崩溃失败恢复已配置，依微软文档在系统重启后生效，不保证新安装同次启动立即生效。明确 STOP/正常卸载不触发恢复。正常卸载仍要求教师维护密码；离线或状态损坏时，提升权限的 OS 管理员可用 `--admin-recovery-remove`。仅清理已标记版本目录中的固定文件，未知内容、重解析点与硬链接会保留供 IT 检查。
+
+这些行为必须经该提交 Windows CI 的临时密钥/临时服务端验收；仍不代表已在目标精简 Windows 10/兆芯硬件或 OEM 教室镜像上通过实测，也不代表旧 alpha.6 下载包含此功能。

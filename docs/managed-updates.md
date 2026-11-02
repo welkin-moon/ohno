@@ -126,13 +126,13 @@ API 使用 POST 正文传设备秘密，供原生客户端在实际 TLS 验证�
 - [BCryptVerifySignature](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptverifysignature)：CNG 的 ECDSA 验签输入是哈希。
 - [Microsoft CNG 签名示例](https://learn.microsoft.com/en-us/windows/win32/seccng/signing-data-with-cng)：原生 API 的密钥与签名流程。
 
-### Native host/runtime slice (not yet the installer default)
+### Native host/runtime
 
 `PayloadLayout=1` explicitly selects the managed host. An absent marker retains
 existing installs; invalid markers or a missing/corrupt managed journal never
-silently bootstrap a new replay floor. The next installer-layout change will
-create the trusted baseline and marker after teacher authorization. Current
-published installers are not retroactively migrated by this source change.
+silently bootstrap a new replay floor. The managed installer integration below creates the trusted baseline and marker
+after teacher authorization. Previously published installers are not retroactively
+migrated by this source change.
 
 The SCM host owns one worker process tree. It verifies retained package/signature
 and every extracted file before starting the fixed `ohno-worker.exe`, uses an
@@ -164,5 +164,35 @@ clone identity regeneration runs first. No maintenance password is used here.
 Windows CI executes only compiled fixture workers in temporary directories for
 this slice, including health refusals, current approval revocation, rollback,
 replay, stop-at-boundary, nine real host process crashes (including atomic creation/pre-resume boundaries), offline committed launch,
-worker keepalive and killing the host with a live descendant. Actual production
-worker/installer/service update acceptance remains the next integration test.
+worker keepalive and killing the host with a live descendant. Actual production worker/installer/service update acceptance is covered by the
+managed integration CI described below; a source change alone is not a pass.
+
+
+### Managed installer integration
+
+The installer now explicitly creates layout 1 after online maintenance authority:
+new protected Program Files directory, fixed SCM host/root maintenance entry,
+read-only request launcher, an embedded baseline package and durable initial
+journal. Payload creation precedes SCM startup. A separate maintenance-only build
+avoids recursively embedding an installer inside its own payload. The fixed root
+maintenance entry is deliberately retained for offline OS-admin recovery; it is
+not overwritten by ordinary worker updates.
+
+The request launcher pins trusted NTFS ancestors, reads an atomic selector
+snapshot without the writer lock, verifies retained package bytes, and starts the
+last-good version's GUI. It never runs probationary UI. Removal waits for SCM STOP
+before conservative owner-marked exact-file cleanup; corrupted journals don't
+block explicit administrator recovery. Unknown content/reparse/hardlinks are not
+recursively deleted. New directory ACLs grant full control to SYSTEM/admins and
+read/execute to ordinary users; existing machine permissions are not rewritten.
+
+SCM non-crash failure actions are explicitly configured and read back in tests.
+Microsoft documents that this [flag takes effect after a system restart](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_failure_actions_flag);
+no immediate first-install guarantee is claimed. Ordinary process failure uses
+standard SCM recovery. An already-signaled STOP is reported as success. Windows CI now exercises actual managed installation,
+production worker update commit, signed unhealthy fixture rollback, replay floor,
+standard STOP staying stopped, explicit restart, configured recovery flag plus actual process-failure recovery,
+teacher-authorized removal/reinstall and offline OS-admin recovery. No production
+key, actual classroom service or user machine is touched by these CI fixtures.
+
+Non-crash recovery across reboot and full OEM image acceptance remain target-VM/hardware qualification, not a result inferred from same-boot CI.

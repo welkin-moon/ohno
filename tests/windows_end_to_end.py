@@ -1,4 +1,5 @@
 """Ephemeral GitHub Windows runner only. Installs a test root and service, then removes both."""
+import ctypes
 import hashlib
 import http.client
 import json
@@ -19,6 +20,7 @@ root=Path.cwd()
 sys.path.insert(0,str(root/'teacher'))
 from server import Store
 from school_installer import build_school_installer
+from update_package import FILES, build_package
 setup=root/'ohno-setup.exe'
 target=root/'test-target.exe'
 ctx=None
@@ -51,6 +53,28 @@ def waitfor(fn,seconds=90):
 def form(path,values):
     status,_,text=control_call('POST',path,urlencode(values))
     if status!=303:raise RuntimeError('request rejected: '+str(status)+' '+text)
+
+
+def configured_recovery_flag():
+    api=ctypes.WinDLL('advapi32',use_last_error=True)
+    api.OpenSCManagerW.argtypes=[ctypes.c_wchar_p,ctypes.c_wchar_p,ctypes.c_uint32];api.OpenSCManagerW.restype=ctypes.c_void_p
+    api.OpenServiceW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_uint32];api.OpenServiceW.restype=ctypes.c_void_p
+    api.QueryServiceConfig2W.argtypes=[ctypes.c_void_p,ctypes.c_uint32,ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(ctypes.c_uint32)]
+    api.CloseServiceHandle.argtypes=[ctypes.c_void_p]
+    manager=api.OpenSCManagerW(None,None,1);service=api.OpenServiceW(manager,'OhnoPrototype',1) if manager else None
+    try:
+        flag=ctypes.c_int32();needed=ctypes.c_uint32()
+        if not service or not api.QueryServiceConfig2W(service,4,ctypes.byref(flag),ctypes.sizeof(flag),ctypes.byref(needed)):raise ctypes.WinError(ctypes.get_last_error())
+        return bool(flag.value)
+    finally:
+        if service:api.CloseServiceHandle(service)
+        if manager:api.CloseServiceHandle(manager)
+
+
+def host_pid():
+    result=subprocess.run(['sc.exe','queryex','OhnoPrototype'],capture_output=True,text=True,check=True)
+    match=re.search(r'PID\s*:\s*(\d+)',result.stdout)
+    return int(match.group(1)) if match else 0
 
 
 def assert_removed(thumb):
@@ -95,8 +119,10 @@ def main():
             if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:raise RuntimeError('denied install changed service state')
             subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
                            input=maintenance_password+'\n',text=True,check=True,timeout=30);installed=True;root_installed=True
+            assert configured_recovery_flag()
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno') as config:
                 if winreg.QueryValueEx(config,'ReleasePublicKey')[0]!=release_public_key:raise RuntimeError('school release public key was not pinned at install')
+                if winreg.QueryValueEx(config,'PayloadLayout')[0]!=1:raise RuntimeError('managed layout missing')
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype') as uninstall:
                 command=winreg.QueryValueEx(uninstall,'UninstallString')[0]
                 if 'ohno-maintenance.exe' not in command or not command.endswith(' --remove'):raise RuntimeError('normal Windows uninstall entry missing')
@@ -155,6 +181,45 @@ def main():
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,path,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as registry:
                     return all(winreg.EnumValue(registry,i)[1]!='game.example' for i in range(winreg.QueryInfoKey(registry)[1]))
             waitfor(website_unblocked,90)
+            # Actual stable service host, production worker and teacher catalog:
+            # immutable packages, normal commit, then unhealthy candidate rollback.
+            installation=Path(os.environ['ProgramFiles'])/'OhnoPrototype'
+            def journal():return json.loads((installation/'update-state.json').read_text())
+            baseline=journal()['active'];assert baseline['sequence']==0
+            def publish(version,worker_name='ohno-worker.exe'):
+                files={name:(root/(worker_name if name=='ohno-worker.exe' else name)).read_bytes() for name in FILES}
+                package=build_package(version,files)
+                status,_,body=control_call('POST','/updates/approve',package,{'Content-Type':'application/octet-stream','X-Ohno-CSRF':csrf})
+                if status!=200:raise RuntimeError('fixture release approval failed: '+str(status)+' '+body)
+                return json.loads(body)
+            publish('0.2.0')
+            good=waitfor(lambda:journal() if journal()['phase']=='stable' and journal()['active']['sequence']==1 else None,180)
+            assert good['active']['version']=='0.2.0' and good['high_water']==1
+            assert device in read()['devices'] and read()['devices'][device]['bound_mac']==first_mac
+            publish('0.2.1-nohealth','worker-fixture.exe')
+            rolled=waitfor(lambda:journal() if journal()['phase']=='stable' and journal()['high_water']==2 else None,180)
+            assert rolled['active']==good['active'] and rolled['last_good']==good['active']
+            # Ensure failed sequence does not retry and production pipe returned.
+            waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-update.example'],stdout=subprocess.DEVNULL).returncode==0,90)
+            before=journal()['generation'];time.sleep(65);assert journal()['generation']==before
+            # Standard STOP remains stopped despite keepalive and configured SCM
+            # recovery; explicit restart runs committed last-good offline-capable.
+            subprocess.run(['sc.exe','stop','OhnoPrototype'],check=True)
+            def service_stopped():
+                output=subprocess.run(['sc.exe','query','OhnoPrototype'],capture_output=True,text=True).stdout
+                return 'STOPPED' in output
+            waitfor(service_stopped,25);time.sleep(12);assert service_stopped()
+            subprocess.run(['sc.exe','start','OhnoPrototype'],check=True)
+            waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-restart.example'],stdout=subprocess.DEVNULL).returncode==0,90)
+            assert journal()['active']==good['active'] and journal()['high_water']==2
+            # Standard SCM crash recovery works without a reboot. The stored
+            # non-crash flag is verified above; Microsoft's documented activation
+            # is after system restart, which this ephemeral CI job does not fake.
+            previous_host=host_pid();assert previous_host
+            subprocess.run(['taskkill','/PID',str(previous_host),'/F'],check=True)
+            waitfor(lambda:host_pid() if host_pid() not in (0,previous_host) else None,40)
+            waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-recovery.example'],stdout=subprocess.DEVNULL).returncode==0,60)
+            assert journal()['active']==good['active'] and journal()['high_water']==2
             # Revoked maintenance authority must not stop or remove the service.
             form('/maintenance-password',{'csrf':csrf,'action':'clear'})
             denied=subprocess.run([str(setup),'--remove','--password-stdin'],
