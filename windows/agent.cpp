@@ -174,7 +174,7 @@ response request(const std::wstring& url,const wchar_t* method,const wchar_t* pa
     return out;
 }
 }
-void run_agent(HANDLE stop_event){
+void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle){
     auto on_request=[](const std::string& payload)->std::string{
         try{
             auto server=get_server();if(server.empty())return "unavailable";auto ident=get_identity();
@@ -205,6 +205,7 @@ void run_agent(HANDLE stop_event){
     ohno::ApprovalQueue queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
         bool tun_ok=tun.ensure(tun_blocked,tun_allowed);
+        bool cycle_ok=tun_ok&&network.available();
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
             auto ident=get_identity();auto policy_text=cached_policy();bool online=false;
@@ -241,9 +242,9 @@ void run_agent(HANDLE stop_event){
                 const auto& site_allowed=active.allowed_sites;
                 bool paused=active.paused;
                 tun_blocked=domains;tun_allowed=site_allowed;
-                if(!tun.ensure(tun_blocked,tun_allowed))debug(L"ohno: TUN unavailable or restarting\n");
-                if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
-                if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
+                if(!tun.ensure(tun_blocked,tun_allowed)){cycle_ok=false;debug(L"ohno: TUN unavailable or restarting\n");}
+                if(!apply_edge_policy(domains)){cycle_ok=false;debug(L"ohno: Edge policy update failed\n");}
+                if(!apply_edge_allow_policy(site_allowed)){cycle_ok=false;debug(L"ohno: Edge allow policy update failed\n");}
                 network.apply_grants(network_allowed);
                 network.set_paused(paused);
                 if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed,0,stop_event)){
@@ -267,6 +268,8 @@ void run_agent(HANDLE stop_event){
                     return response.status;
                 });
             }
+            // Offline cached policy is valid health; SCM RUNNING alone is not.
+            if(cycle_ok&&website_requests.available()&&healthy_cycle&&WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT)healthy_cycle();
         }catch(const std::exception&){debug(L"ohno: service iteration failed\n");}
         if(WaitForSingleObject(stop_event,15000)!=WAIT_TIMEOUT)break;
     }

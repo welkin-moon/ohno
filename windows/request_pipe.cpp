@@ -15,8 +15,10 @@ void RequestPipe::serve(){
     if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x12019B;;;AU)",SDDL_REVISION_1,&sd,nullptr))return;
     SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};
     while(WaitForSingleObject(stop_,0)==WAIT_TIMEOUT){
+        available_.store(false);
         handle pipe{CreateNamedPipeW(L"\\\\.\\pipe\\OhnoWebsiteRequest",PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,1024,1024,0,&sa)};
         if(!pipe.h||pipe.h==INVALID_HANDLE_VALUE){if(WaitForSingleObject(stop_,1000)!=WAIT_TIMEOUT)break;continue;}
+        available_.store(true);
         handle event{CreateEventW(nullptr,TRUE,FALSE,nullptr)};if(!event.h)break;
         OVERLAPPED ov{};ov.hEvent=event.h;
         BOOL connected=ConnectNamedPipe(pipe.h,&ov);DWORD error=connected?ERROR_SUCCESS:GetLastError();
@@ -44,5 +46,6 @@ void RequestPipe::serve(){
         if(!ok&&error==ERROR_IO_PENDING){HANDLE waits[2]{stop_,event.h};if(WaitForMultipleObjects(2,waits,FALSE,5000)!=WAIT_OBJECT_0+1){CancelIoEx(pipe.h,&ack);WaitForSingleObject(event.h,INFINITE);}else GetOverlappedResult(pipe.h,&ack,&received,FALSE);}
         DisconnectNamedPipe(pipe.h);
     }
+    available_.store(false);
     LocalFree(sd);
 }

@@ -125,3 +125,44 @@ API 使用 POST 正文传设备秘密，供原生客户端在实际 TLS 验证�
 - [SCM SERVICE_FAILURE_ACTIONS](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_failure_actionsw)：使用系统异常恢复机制，不构造隐藏保活。
 - [BCryptVerifySignature](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptverifysignature)：CNG 的 ECDSA 验签输入是哈希。
 - [Microsoft CNG 签名示例](https://learn.microsoft.com/en-us/windows/win32/seccng/signing-data-with-cng)：原生 API 的密钥与签名流程。
+
+### Native host/runtime slice (not yet the installer default)
+
+`PayloadLayout=1` explicitly selects the managed host. An absent marker retains
+existing installs; invalid markers or a missing/corrupt managed journal never
+silently bootstrap a new replay floor. The next installer-layout change will
+create the trusted baseline and marker after teacher authorization. Current
+published installers are not retroactively migrated by this source change.
+
+The SCM host owns one worker process tree. It verifies retained package/signature
+and every extracted file before starting the fixed `ohno-worker.exe`, uses an
+explicit executable path (no shell), and inherits only a private stop event and
+health-pipe writer. A non-inherited kill-on-close job owns workers and descendants;
+normal service STOP and uninstall win, and host death cannot leave an independent
+watchdog/TUN tree. This uses standard Windows [handle lists](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+and [nested jobs](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs),
+not a second persistent service or protection against OS administrators.
+
+Startup durably rolls back any incomplete transaction before launch. New builds
+stage while the old worker runs, then obtain a fresh online decision before
+prepare. Its in-memory launch budget is capped at 20 seconds, never persisted as
+a bearer token. Old worker shutdown precedes durable probation and candidate
+launch. Health is a bounded strict document over the inherited private pipe,
+bound to the random transaction and actual launched sequence/version/hash. The
+production worker reports only after a completed local policy cycle with its
+request pipe, TUN and WFP available; offline cached policy is allowed. Mere SCM
+RUNNING, a responding teacher, or a public pipe is not a health proof.
+
+Only durable health commit changes last-good. Timeout, exit, malformed/mismatched
+proof or STOP before commit terminates the candidate and rolls back without
+lowering high-water. Uncertain persistence exits the host and requires journal
+recovery, not optimistic continuation. Ordinary worker exits use a bounded
+restart budget, then standard SCM recovery; an explicit normal STOP is not
+restarted. Device identity is read after worker health, so existing hardware-bound
+clone identity regeneration runs first. No maintenance password is used here.
+
+Windows CI executes only compiled fixture workers in temporary directories for
+this slice, including health refusals, current approval revocation, rollback,
+replay, stop-at-boundary, six real host process crashes, offline committed launch,
+worker keepalive and killing the host with a live descendant. Actual production
+worker/installer/service update acceptance remains the next integration test.
