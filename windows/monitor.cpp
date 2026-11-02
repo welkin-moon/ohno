@@ -6,9 +6,7 @@
 #include <string>
 #include <cwchar>
 #include <vector>
-#include <map>
 #include <algorithm>
-#include <mutex>
 #include "monitor.hpp"
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "wtsapi32.lib")
@@ -28,9 +26,6 @@ bool same_stamp(const file_stamp& a,const file_stamp& b){
         CompareFileTime(&a.info.ftLastWriteTime,&b.info.ftLastWriteTime)==0&&
         a.basic.ChangeTime.QuadPart==b.basic.ChangeTime.QuadPart;
 }
-struct cached { file_stamp stamp; std::string hash; };
-std::map<std::wstring,cached> cache;
-std::mutex cache_mutex;
 }
 std::string program_image_hash(const std::wstring& path,HANDLE stop_event) {
     if(stop_event&&WaitForSingleObject(stop_event,0)==WAIT_OBJECT_0)return {};
@@ -43,11 +38,10 @@ std::string program_image_hash(const std::wstring& path,HANDLE stop_event) {
     ULONGLONG size=(static_cast<ULONGLONG>(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
     // Avoid hashing enormous or special files on a classroom computer.
     if(size>512ULL*1024*1024)return {};
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex);auto prev=cache.find(path);
-        if(prev!=cache.end()&&before.basic.ChangeTime.QuadPart!=0&&
-            (info.nFileIndexHigh||info.nFileIndexLow)&&same_stamp(prev->second.stamp,before))return prev->second.hash;
-    }
+    // Metadata is not a content generation: NTFS ChangeTime can coincide for
+    // rapid equal-size rewrites, even when mtime is explicitly restored. Never
+    // reuse a previous digest to grant an exception from metadata alone.
+    // Hash the bytes under this writer/rename-denying handle on every call.
     algorithm alg;if(BCryptOpenAlgorithmProvider(&alg.h,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)return {};
     DWORD object_size=0,got=0;if(BCryptGetProperty(alg.h,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&object_size),sizeof(object_size),&got,0)<0)return {};
     std::vector<unsigned char> object(object_size);hash_handle hash;
@@ -57,7 +51,6 @@ std::string program_image_hash(const std::wstring& path,HANDLE stop_event) {
     unsigned char digest[32]{};if(BCryptFinishHash(hash.h,digest,sizeof(digest),0)<0)return {};
     file_stamp after;if(!read_stamp(file.h,after)||!same_stamp(before,after))return {};
     const char* hex="0123456789abcdef";std::string out;out.reserve(64);for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}
-    {std::lock_guard<std::mutex> lock(cache_mutex);if(cache.size()>2048)cache.clear();cache[path]={before,out};}
     return out;
 }
 namespace {

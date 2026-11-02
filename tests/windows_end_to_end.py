@@ -77,6 +77,64 @@ def host_pid():
     return int(match.group(1)) if match else 0
 
 
+
+def request_window(expected):
+    """Open the fixed launcher and close only its verified versioned GUI."""
+    api=ctypes.WinDLL('kernel32',use_last_error=True)
+    ui=ctypes.WinDLL('user32',use_last_error=True)
+    ui.FindWindowW.argtypes=[ctypes.c_wchar_p,ctypes.c_wchar_p];ui.FindWindowW.restype=ctypes.c_void_p
+    ui.GetWindowThreadProcessId.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_uint32)]
+    ui.PostMessageW.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_size_t,ctypes.c_ssize_t]
+    api.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32];api.OpenProcess.restype=ctypes.c_void_p
+    api.QueryFullProcessImageNameW.argtypes=[ctypes.c_void_p,ctypes.c_uint32,ctypes.c_wchar_p,ctypes.POINTER(ctypes.c_uint32)]
+    api.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
+    api.TerminateProcess.argtypes=[ctypes.c_void_p,ctypes.c_uint32];api.CloseHandle.argtypes=[ctypes.c_void_p]
+    assert not ui.FindWindowW('OhnoRequestWindow',None),'unexpected pre-existing request window'
+    launcher=subprocess.Popen([str(Path(os.environ['ProgramFiles'])/'OhnoPrototype'/'ohno-request.exe')])
+    process=None;owned=False
+    try:
+        window=waitfor(lambda:ui.FindWindowW('OhnoRequestWindow',None),20)
+        pid=ctypes.c_uint32();ui.GetWindowThreadProcessId(window,ctypes.byref(pid))
+        process=api.OpenProcess(0x101001,False,pid.value)
+        name=ctypes.create_unicode_buffer(32768);size=ctypes.c_uint32(len(name))
+        if not process or not api.QueryFullProcessImageNameW(process,0,name,ctypes.byref(size)):raise ctypes.WinError(ctypes.get_last_error())
+        assert Path(name.value)==expected,'launcher did not select expected last-good request GUI'
+        owned=True
+        assert ui.PostMessageW(window,0x0010,0,0) # normal WM_CLOSE, not forced shutdown
+        assert api.WaitForSingleObject(process,10000)==0,'request GUI did not close normally'
+        assert launcher.wait(timeout=5)==0
+    finally:
+        # Cleanup only processes created by this fixture and whose executable
+        # identity was checked. This is never used to make the normal test pass.
+        if owned and api.WaitForSingleObject(process,0)==258:api.TerminateProcess(process,1)
+        if process:api.CloseHandle(process)
+        if launcher.poll() is None:launcher.kill();launcher.wait(timeout=5)
+
+
+def install_fixture(installer):
+    """One attempt, bounded separately from TLS authorization; never replay."""
+    command=[str(installer),'--install-bundled','--password-stdin']
+    started=time.monotonic()
+    process=subprocess.Popen(command,stdin=subprocess.PIPE,text=True)
+    try:
+        try:
+            process.communicate(maintenance_password+'\n',timeout=30)
+        except subprocess.TimeoutExpired:
+            # The 20-second TLS budget is not a whole-install budget: baseline
+            # archive/extracted bytes plus fixed recovery entry exceed 200 MB.
+            # Observe the same process, without retrying an uncertain install.
+            installation=Path(os.environ['ProgramFiles'])/'OhnoPrototype'
+            print('SLOW FIXTURE INSTALL FILES',[(str(path.relative_to(installation)),path.stat().st_size)
+                  for path in installation.rglob('*') if path.is_file()],flush=True)
+            print(subprocess.run(['sc.exe','query','OhnoPrototype'],capture_output=True,text=True).stdout,flush=True)
+            process.communicate(timeout=max(1,120-(time.monotonic()-started)))
+        if process.returncode:
+            raise RuntimeError('fixture install failed: '+str(process.returncode))
+        print('FIXTURE INSTALL SECONDS',round(time.monotonic()-started,2),flush=True)
+    finally:
+        if process.poll() is None:
+            process.kill();process.wait(timeout=5)
+
 def assert_removed(thumb):
     for path in [r'SOFTWARE\Ohno',r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype']:
         try:
@@ -117,8 +175,9 @@ def main():
                                     input='wrong classroom maintenance passphrase\n',text=True,timeout=30)
             if rejected.returncode==0:raise RuntimeError('incorrect password installed service')
             if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:raise RuntimeError('denied install changed service state')
-            subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
-                           input=maintenance_password+'\n',text=True,check=True,timeout=30);installed=True;root_installed=True
+            # Cleanup covers even a partial/timeout authorized attempt.
+            installed=True;root_installed=True
+            install_fixture(school_setup)
             assert configured_recovery_flag()
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno') as config:
                 if winreg.QueryValueEx(config,'ReleasePublicKey')[0]!=release_public_key:raise RuntimeError('school release public key was not pinned at install')
@@ -198,6 +257,8 @@ def main():
                     update_diagnostics();raise
 
             baseline=journal()['active'];assert baseline['sequence']==0
+            def request_exe(revision):return installation/'versions'/(str(revision['sequence'])+'-'+revision['sha256'])/'ohno-request.exe'
+            request_window(request_exe(baseline))
             def publish(version,worker_name='ohno-worker.exe'):
                 files={name:(root/(worker_name if name=='ohno-worker.exe' else name)).read_bytes() for name in FILES}
                 package=build_package(version,files)
@@ -219,8 +280,9 @@ def main():
                 update_diagnostics();raise RuntimeError('installed native offer probe failed')
             good=wait_update(lambda:journal() if journal()['phase']=='stable' and journal()['active']['sequence']==1 else None,180)
             assert good['active']['version']=='0.2.0' and good['high_water']==1
+            request_window(request_exe(good['active']))
             assert device in read()['devices'] and read()['devices'][device]['bound_mac']==first_mac
-            publish('0.2.1-nohealth','worker-fixture.exe')
+            publish('0.2.1-nohealth-open','worker-fixture.exe')
             rolled=wait_update(lambda:journal() if journal()['phase']=='stable' and journal()['high_water']==2 else None,180)
             assert rolled['active']==good['active'] and rolled['last_good']==good['active']
             # This adversarial test worker writes its own public event trace.
@@ -228,9 +290,12 @@ def main():
             # fixture file; production cleanup must retain unknown root files.
             fixture_log=installation/'worker-events.log'
             fixture_events=fixture_log.read_text().splitlines()
-            assert any(' start 2 0.2.1-nohealth' in line for line in fixture_events)
-            assert any(' stop 0.2.1-nohealth' in line for line in fixture_events)
+            assert any(' start 2 0.2.1-nohealth-open' in line for line in fixture_events)
+            assert any(' stop 0.2.1-nohealth-open' in line for line in fixture_events)
+            silence=[int(line.split()[-1]) for line in fixture_events if ' silent-ms ' in line]
+            assert len(silence)==1 and 88000<=silence[0]<=105000,('actual 90-second health timeout',silence)
             fixture_log.unlink()
+            request_window(request_exe(rolled['last_good']))
             # Ensure failed sequence does not retry and production pipe returned.
             waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-update.example'],stdout=subprocess.DEVNULL).returncode==0,90)
             before=journal()['generation'];time.sleep(65);assert journal()['generation']==before
@@ -259,6 +324,37 @@ def main():
             if denied.returncode==0:raise RuntimeError('disabled maintenance password removed service')
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SYSTEM\CurrentControlSet\Services\OhnoPrototype'):
                 pass
+
+            # Simulate an OEM image's copied registry identity on a new hardware
+            # anchor. Do not change the runner's OS UUID/MAC or use an installer.
+            # Maintenance authority is disabled for this entire clone boot.
+            before_clone=journal()
+            subprocess.run(['sc.exe','stop','OhnoPrototype'],check=True)
+            waitfor(service_stopped,25)
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno\Identity',0,winreg.KEY_READ|winreg.KEY_SET_VALUE) as identity:
+                copied=winreg.QueryValueEx(identity,'Credentials')[0]
+                _,old_id,old_key=copied.rsplit(':',2)
+                assert old_id==device
+                winreg.QueryValueEx(identity,'Policy') # a cached policy really exists
+                winreg.SetValueEx(identity,'Credentials',0,winreg.REG_SZ,'fixture-source-machine:'+old_id+':'+old_key)
+            # A single physical runner retains its MAC. Revoke the source's
+            # fixture enrollment so that the new ID is not a duplicate approval.
+            form('/device',{'csrf':csrf,'id':device,'approved':'0'})
+            known=set(read()['devices'])
+            subprocess.run(['sc.exe','start','OhnoPrototype'],check=True)
+            clone_device=waitfor(lambda:next(iter(set(read()['devices'])-known),None),90)
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno\Identity') as identity:
+                _,new_id,new_key=winreg.QueryValueEx(identity,'Credentials')[0].rsplit(':',2)
+                assert new_id==clone_device and new_id!=old_id and new_key!=old_key
+                try:winreg.QueryValueEx(identity,'Policy')
+                except FileNotFoundError:pass
+                else:raise RuntimeError('cloned identity retained cached policy/grants')
+            assert journal()==before_clone and not read()['devices'][clone_device]['approved']
+            form('/device',{'csrf':csrf,'id':clone_device,'approved':'1'})
+            status,_,policy=call('GET','/api/device/policy',headers={'X-Ohno-Device':new_id,'X-Ohno-Key':new_key})
+            assert status==200 and not json.loads(policy)['grants'],'copied device inherited temporary grants'
+            device=clone_device
+            waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-clone.example'],stdout=subprocess.DEVNULL).returncode==0,90)
             form('/maintenance-password',{'csrf':csrf,'action':'set','maintenance_password':maintenance_password})
             # Device revocation is not a trap preventing authorized removal.
             form('/device',{'csrf':csrf,'id':device,'approved':'0'})
@@ -270,9 +366,8 @@ def main():
             installed=False
             assert_removed(thumb)
             previous_devices=set(read()['devices'])
-            subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
-                           input=maintenance_password+'\n',text=True,check=True,timeout=35)
             installed=True
+            install_fixture(school_setup)
             waitfor(lambda:set(read()['devices'])-previous_devices,90)
             server.terminate();server.wait(timeout=10);server=None
             offline=subprocess.run([str(setup),'--remove','--password-stdin'],

@@ -79,10 +79,13 @@ def main():
                 offer(mode=mode);directory=root/mode;state_is(run(directory,stop_ms=20000),0,0)
                 assert not any(' start 7 ' in line for line in events(directory));stopped(directory)
             offer();directory=root/'wrong-cert';state_is(run(directory,certificate=(root/'other.pem').read_text(),stop_ms=20000),0,0);stopped(directory)
-            for bad in ['exit','nohealth','nonce','revision','zero','malformed','oversize']:
+            for bad in ['exit','nohealth','nohealth-open','nonce','revision','zero','malformed','oversize']:
                 offer('0.2.0-'+bad);directory=root/('bad-'+bad);state_is(run(directory,stop_ms=20000,stop_after_poll=False,stop_after_rollback=True),0,7)
                 log=events(directory);assert sum(' start 7 ' in line for line in log)==1,log
                 assert sum(' start 0 ' in line for line in log)>=2,log;stopped(directory)
+                if bad=='nohealth-open':
+                    silence=[int(line.split()[-1]) for line in log if ' silent-ms ' in line]
+                    assert len(silence)==1 and 2800<=silence[0]<=6000,('bounded silent health timeout',silence)
             for point in [4,5,6,7,10,11,12]:
                 offer();directory=root/('stop-'+str(point));state_is(run(directory,stop_at=point),0,7)
                 assert sum(' start 0 ' in line for line in events(directory))==1;stopped(directory)

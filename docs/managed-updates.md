@@ -1,6 +1,6 @@
 # 托管升级与教师维护授权
 
-状态：设计 + 协议校验 + 服务端维护授权 + 原生安装 / 卸载在线授权。**当前服务尚未接入下载、自动执行、版本切换或回滚；已发布 alpha.6 旧安装器也没有教师密码保护。** 不可把此文档或测试通过理解为已能实机升级。跟踪：[Issue #7](https://github.com/welkin-moon/ohno/issues/7)。
+状态：当前源码包含教师维护授权、原生受管安装、教师签名批准目录、拉取暂存、单一 SCM 宿主、持久切换与失败回滚。**这是开发预览，不是已通过目标教室硬件验收的成品；已发布 alpha.6 不包含这些新增功能。** 以下按实现顺序说明各组件，集成行为见文末；只有相应提交的 Windows CI 全绿才代表该提交通过隔离测试，不能用单组件校验代替整链验收。跟踪：[Issue #7](https://github.com/welkin-moon/ohno/issues/7)。
 
 ## 用户要求与现有行为
 
@@ -37,9 +37,9 @@ JSON 必须恰好包含以下 10 个字段。任何未知或重复字段、浮�
 
 签名原文是 ASCII：域分隔行 `ohno-update-p256-sha256-v1`，随后依次为 schema、platform、sequence、version、min_updater、issued_at、expires_at、size、sha256；每项以 LF 结尾，包括最后一项。JSON 的空格、字段顺序不参与签名。签名域禁止换行，消除拼接歧义。
 
-验证公钥采用 SEC1 非压缩 P-256 点（`04 || X || Y`，130 位小写十六进制），由安装时已核实的学校信任配置提供；清单不能自行提供公钥或要求信任新键。发布签名密钥与教师 HTTPS 私钥分离，只保留在教师端受限状态目录。密钥生成、持久化、轮换和安装时绑定尚未实现；缺少可信公钥必须拒绝升级，不回退为“只有哈希”校验。
+验证公钥采用 SEC1 非压缩 P-256 点（`04 || X || Y`，130 位小写十六进制），由安装时已核实的学校信任配置提供；清单不能自行提供公钥或要求信任新键。发布签名密钥与教师 HTTPS 私钥分离，只保留在教师端受限状态目录。发布身份生成、持久化与安装时绑定见下文；自动信任轮换尚未实现。缺少可信公钥必须拒绝升级，不回退为“只有哈希”校验。
 
-包的路径由摘要生成：`/api/device/update/package/<sha256>`。清单没有任意 URL、命令行、目标路径或解压条目。将来的下载器必须固定安装时的 HTTPS origin、禁用重定向、正常验证 TLS，并再次核对最终字节数与哈希。签名验证先于下载；完整包验证先于执行；来自同一次未经认证下载的 SHA256SUMS 不能代替发布签名。
+包的路径由摘要生成：`/api/device/update/package/<sha256>`。清单没有任意 URL、命令行、目标路径或解压条目。原生下载器固定安装时的 HTTPS origin、禁用重定向、正常验证 TLS，并再次核对最终字节数与哈希。签名验证先于下载；完整包验证先于执行；来自同一次未经认证下载的 SHA256SUMS 不能代替发布签名。
 
 ## 第二阶段：服务端维护授权
 
@@ -50,7 +50,7 @@ JSON 必须恰好包含以下 10 个字段。任何未知或重复字段、浮�
 - 返回通过 HTTPS 直接认证的短时决定，包含 action、nonce、device_id、authorized_at、expires_at（120 秒），**不是可复制的 bearer token 或离线票据**。安装器检查这些值与本地随机事务匹配并立即使用；不写入模板或用于克隆首次开机。此端点不会执行任何客户端操作。
 - 全局每 300 秒最多 32 次 KDF，单来源最多 8 次，包括成功请求；最多两个并发 KDF，且不在教师策略锁内计算。来源地址来自连接，不信任转发 Header。限流记录有界，不随任意来源无限增长。LAN 洪泛可能暂时阻止维护，但不占满策略 worker；OS 管理员恢复通道不受其约束。
 - 密码被关闭/轮换时，进行中的旧密码校验失效。成功决定先记录最近 100 条不含密码或设备密钥的事件再返回；状态保存失败返回 503，不产生未落盘授权。
-- 未设置密码默认拒绝维护 API，停用密码也拒绝而不是放行。不会影响已有注册、心跳、日常审批或镜像唯一身份逻辑。学校安装包仍仅携带 origin 与公开证书；不携带维护密码或验证哈希。
+- 未设置密码默认拒绝维护 API，停用密码也拒绝而不是放行。不会影响已有注册、心跳、日常审批或镜像唯一身份逻辑。学校安装包携带 origin、公开证书及已初始化的发布验证公钥；不携带维护密码、验证哈希或私钥。
 
 ### 第三阶段：原生安装 / 卸载入口
 
@@ -62,9 +62,9 @@ JSON 必须恰好包含以下 10 个字段。任何未知或重复字段、浮�
 - 不隐藏服务，不阻止管理员标准恢复。卸载正在运行的维护器自身时，用标准重启后删除机制仅安排删除该文件，并提示剩余目录需检查；不会递归删除未知内容。CLI 测试使用外部安装器，尚未验证 GUI 应用列表卸载后的真实重启清理。
 - Windows CI 使用临时证书 / 密钥与隔离 runner，覆盖原生传输、错误授权零副作用、取消 / 重试 / 重复点击，以及实际安装、教师撤销和正常卸载。Linux 可运行 fixture 自测，但不能替代 Windows 原生执行结果。仍需授权的真实 Windows 10 / OEM 镜像验证。
 
-已发布 alpha.6 不会因为服务端设置密码就得到保护，须配套新版程序。上述入口不是自动升级：尚无升级发布、下载、事务切换或回滚运行时。
+已发布 alpha.6 不会因为服务端设置密码就得到保护，须配套新版程序。维护授权入口本身不等于自动升级；完整发布、拉取、事务与服务集成见下文。
 
-## 持久事务组件（待接入服务运行时）
+## 持久事务组件
 
 `src/update_transaction.hpp` 定义严格的 `stable → prepared → probation → stable` 事务记录。`prepared` 保留旧活动版本；只有原子持久化 `probation` 后才允许启动候选。健康证明必须匹配本次随机事务 ID、序号、版本、包摘要和成功的 agent 工作周期，不能使用联网成功或 SCM RUNNING 代替。进程 / 系统重启遇到任何未提交状态，先持久化回滚到 `last_good`；防重放高水位不降低。失败构建不可循环重试，重新发布旧字节也必须使用更高序号。
 
@@ -72,19 +72,19 @@ JSON 必须恰好包含以下 10 个字段。任何未知或重复字段、浮�
 
 单元测试在每个状态边界注入“未写入 / 已写入但结果不确定”，Windows CI 在实际半写、flush 和 rename 的 7 个检查点强制退出独立进程，再重新打开恢复（35 个中断组合），另测独占锁、损坏、旧暂存文件、硬链接和只读磁盘错误。仅使用临时目录，不安装服务、不创建发布密钥。这验证了进程中断恢复，**不等于目标硬件突然断电的验证**；存储设备仍须正确执行 Windows flush / write-through。
 
-组件目前不下载、不解包、不启动候选，也不接入 SCM 或改变当前客户端。包验证、受保护版本目录、教师当前批准复查、实际 worker 健康通道与服务接入仍是后续工作，不能称为已具备自动升级。
+这个纯事务组件不负责下载、解包或启动候选；包验证、受保护版本目录、教师当前批准复查与私有健康通道由下面的组件和服务运行时组合完成。
 
-## 固定包与教师批准目录（原生拉取接入中）
+## 固定包与教师批准目录
 
 `teacher/update_package.py` / `src/update_package.hpp` 共用 `OHNOPK01` 无压缩容器：8 字节 magic、LE16 版本长度 / 文件数、6 个 LE64 文件长度，随后 ASCII 版本和固定顺序文件。仅包含 worker、申请 UI、维护器、TUN 及两个许可证；没有可指定的路径、命令、链接或可替换服务宿主。前四个文件要求 x64 PE32+，总体不超过 256 MiB，所有长度精确相加且无尾部数据。包外层仍必须通过已经固定学校公钥的签名清单与完整哈希校验；仅解析成功不是认证。
 
 教师本机 CSRF 保护的页面提供显式初始化独立发布身份、验证并批准本地包、暂停发布。私钥只在教师状态旁受限目录，不进入 HTTP 响应或包；新目录在 POSIX 使用 0700，在 Windows 创建时即附加受保护 DACL（仅当前教师账户、SYSTEM、Administrators），不修改已有目录权限；全程文件锁防止多个进程并发分配序号。先写入不可变 SHA256 命名包，再原子保存带签名的批准与高水位；存储结果不确定时毒化实例，须重启检查，不能从旧内存继续放行。重启遇到残缺私钥 / 签名状态不自动重新生成身份。
 
-API 使用 POST 正文传设备秘密，供原生客户端在实际 TLS 验证后发送：`/api/device/update/offer`、`/api/device/update/package/<sha256>`、`/api/device/update/authorize`。设备需已经批准、真实密钥有效且 MAC 仍绑定；只返回当前批准的摘要。执行许可还校验清单序号 / 摘要，并返回随机 nonce、设备、120 秒期限；不是离线票据。暂停发布、设备撤销、MAC 变化、已过期或旧批准均拒绝。下载后应在切换前再次调用执行许可，客户端接入仍待完成。
+API 使用 POST 正文传设备秘密，供原生客户端在实际 TLS 验证后发送：`/api/device/update/offer`、`/api/device/update/package/<sha256>`、`/api/device/update/authorize`。设备需已经批准、真实密钥有效且 MAC 仍绑定；只返回当前批准的摘要。执行许可还校验清单序号 / 摘要，并返回随机 nonce、设备、120 秒期限；不是离线票据。暂停发布、设备撤销、MAC 变化、已过期或旧批准均拒绝。原生服务在完整下载与验证后、切换前再次调用执行许可。
 
 上传脚本只从本机同源加载，不接第三方资源。重复点击只发一次，取消 / 导航中断会明确提示结果未确认，要求刷新再决定重试或暂停；不会把断网错误当作服务器未持久化。已有纯 C++ / Python 共同畸形包测试、教师 API 集成与脚本中断状态测试。没有真实学校发布密钥或现场推送。
 
-## 原生拉取与隔离暂存（服务宿主接入中）
+## 原生拉取与隔离暂存
 
 学校安装包 v2 `OHNOBT02` 在公开 HTTPS 证书外固定 130 字符 SEC1 发布公钥。教师端仅从本校已初始化的发布身份写入该公钥；安装器在正常维护授权成功后保存。旧 v1 / 未初始化教师发布身份仍可安装，但没有可信发布公钥就关闭自动更新，不从清单自学信任，不复制私钥或维护口令。
 
@@ -92,9 +92,9 @@ API 使用 POST 正文传设备秘密，供原生客户端在实际 TLS 验证�
 
 暂存只在持有安装锁的受限 NTFS 根目录下进行，源文件拒绝硬链接 / reparse point 并在映射期间禁止写 / 删除；固定文件逐个 write-through / flush，连同原始包及签名记录在独立随机 staging 目录中完成，再原子改名为 `<序号>-<摘要>` 版本目录。不会覆盖运行中的二进制，不改变活动 journal。崩溃残留只回收格式精确、带本程序所有权标记的 staging 目录和固定文件，绝不递归删除未知内容。启动前可再次比较提取文件与已认证原包；已安装版本签名仍验证，但不因发布许可过期就无法离线运行。
 
-执行前另向教师端请求 nonce / 设备 / 序号 / 摘要 / 120 秒期限绑定的新决定，拒绝暂停、撤销或变更批准。这个函数不把决定存成离线票据，也不启动候选。Windows CI 使用临时 HTTPS / 签名密钥与目录，验证正常拉取、错误 TLS pin、错误发布 key、篡改 / 大小 / 架构 / 重放 / 跳转、取消、错 nonce / hash / device / sequence、撤销、提取文件篡改、初始 baseline、10 个真实暂存中断点及重开回收；不会执行包中 fixture 程序。稳定服务宿主、私有 worker 健康通道与活动切换仍须接上，**此阶段不是已交付的自动更新服务**。
+执行前另向教师端请求 nonce / 设备 / 序号 / 摘要 / 120 秒期限绑定的新决定，拒绝暂停、撤销或变更批准。这个函数不把决定存成离线票据，也不启动候选。Windows CI 使用临时 HTTPS / 签名密钥与目录，验证正常拉取、错误 TLS pin、错误发布 key、篡改 / 大小 / 架构 / 重放 / 跳转、取消、错 nonce / hash / device / sequence、撤销、提取文件篡改、初始 baseline、10 个真实暂存中断点及重开回收；不会执行包中 fixture 程序。这一组件测试不执行包中程序；实际启动、私有健康证明与活动切换由文末服务宿主集成测试另行验证，不能把暂存通过当作升级完成。
 
-## 后续实现门槛
+## 设计边界与验收门槛
 
 ### 1. 教师批准与维护密码
 
@@ -196,3 +196,43 @@ teacher-authorized removal/reinstall and offline OS-admin recovery. No productio
 key, actual classroom service or user machine is touched by these CI fixtures.
 
 Non-crash recovery across reboot and full OEM image acceptance remain target-VM/hardware qualification, not a result inferred from same-boot CI.
+
+### Additional acceptance fixtures
+
+The next acceptance tests exercise the fixed request launcher before update, after
+commit and after rollback, verifying the actual GUI executable path and normal
+window close. They run in the CI runner's user session, not a separately created
+standard-user account. The read/execute ACL and readonly selector tests remain
+separate; this is not a claim of full standard-user desktop qualification.
+
+A deliberately silent fixture keeps its health writer open until stopped. Both
+the isolated runtime's 3-second fixture deadline and the production service's
+90-second deadline are checked using elapsed time logged by that test worker;
+this is distinct from an immediate EOF failure. No production timeout is shortened.
+
+The image test changes only the ephemeral installation's stored source-hardware
+anchor, restarts without an installer while maintenance authority is disabled,
+and verifies new device ID/key, discarded cached policy/grants, unchanged committed
+version/replay floor and ordinary separate device approval. It does not change the
+runner's actual UUID/MAC, perform an OEM clone, or qualify two physical machines.
+All credentials and keys belong only to the disposable CI fixture.
+
+A future explicitly triggered release also includes `ohno-update-windows-x64.ohno`
+and its SHA256SUMS entry, for teacher inspection/approval. This workflow change does
+not publish a release or change VERSION; alpha.6 downloads remain unchanged.
+
+### Native test-gate correction
+
+Inspecting complete CI logs exposed a separate program-hash regression hidden by
+`cmd`'s positive-only `if errorlevel 1`: negative abort/NTSTATUS exits could be
+followed by successful commands and a green job. Every native build/test guard
+now rejects both positive and negative failures, with an actual cmd subprocess
+regression. Earlier green job badges alone are not evidence that hash-test passed.
+
+`program_image_hash` no longer reuses digests across calls based solely on path,
+file ID, size, mtime and ChangeTime; rapid same-size rewrites can share those time
+values. It hashes current bytes under the existing writer/rename-denying handle,
+retaining STOP and 512 MiB bounds and before/after checks. Thirty-two no-sleep
+restored-mtime writes exercise this regression. This conservative correctness fix
+may increase scanning cost; safe caching and target-hardware performance still
+need separate measurement, not a weakened integrity assertion.
