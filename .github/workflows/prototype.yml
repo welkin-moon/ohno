@@ -59,7 +59,7 @@ jobs:
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\update_configuration.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp windows\request_client.cpp src\policy.cpp /Fe:ohno-request.exe advapi32.lib user32.lib /link /SUBSYSTEM:WINDOWS
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\setup_bundle_test.cpp /Fe:setup-bundle-test.exe
@@ -116,7 +116,13 @@ jobs:
           pipe-test.exe
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp /Fe:pipe-client.exe
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_request_client_test.cpp windows\request_client.cpp windows\request_pipe.cpp src\policy.cpp /Fe:request-client-test.exe advapi32.lib
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          request-client-test.exe
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp windows\request_client.cpp /Fe:pipe-client.exe advapi32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\tun_config_emit.cpp src\policy.cpp /Fe:tun-config.exe

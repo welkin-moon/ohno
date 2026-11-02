@@ -1,15 +1,37 @@
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <cstring>
+// Test-only CLI. Production GUI calls the same authenticated pipe client.
 #include <cstdio>
 #include <string>
+#include <windows.h>
+#include "../windows/request_client.hpp"
+namespace {
+struct handle {HANDLE value=nullptr;~handle(){if(value)CloseHandle(value);}};
+struct restricted_caller {
+    handle original,restricted;bool active=false;
+    bool enter(){
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&original.value))return false;
+        BYTE admin[SECURITY_MAX_SID_SIZE]{};DWORD size=sizeof(admin);
+        if(!CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,admin,&size))return false;
+        SID_AND_ATTRIBUTES disable{admin,0};
+        // Only reduce this test process's effective token; no accounts, system
+        // policy, privileges or persistent security descriptors are modified.
+        if(!CreateRestrictedToken(original.value,DISABLE_MAX_PRIVILEGE,1,&disable,0,nullptr,0,nullptr,&restricted.value)||
+            !ImpersonateLoggedOnUser(restricted.value))return false;
+        active=true;BOOL administrator=TRUE;
+        return CheckTokenMembership(nullptr,admin,&administrator)&&!administrator;
+    }
+    ~restricted_caller(){if(active&&!RevertToSelf())TerminateProcess(GetCurrentProcess(),1);}
+};
+}
 int main(int argc,char** argv){
- if(argc!=2)return 1;
- for(int i=0;i<20;++i){
-  HANDLE pipe=CreateFileW(L"\\\\.\\pipe\\OhnoWebsiteRequest",FILE_READ_DATA|FILE_WRITE_DATA|SYNCHRONIZE,0,nullptr,OPEN_EXISTING,0,nullptr);
-  if(pipe!=INVALID_HANDLE_VALUE){DWORD sent=0;DWORD size=static_cast<DWORD>(std::strlen(argv[1]));BOOL ok=WriteFile(pipe,argv[1],size,&sent,nullptr);char reply[64]{};DWORD n=0;if(ok)ok=ReadFile(pipe,reply,sizeof(reply),&n,nullptr);if(ok){char ack='1';DWORD count=0;WriteFile(pipe,&ack,1,&count,nullptr);}CloseHandle(pipe);return ok&&sent==size&&std::string(reply,n)=="accepted"?0:2;}
-  if(i==19)std::fprintf(stderr,"pipe open failed: %lu\n",GetLastError());
-  Sleep(500);
- }
- return 3;
+    if(argc!=2)return 1;
+    restricted_caller caller;if(!caller.enter()){std::fputs("restricted fixture token failed\n",stderr);return 4;}
+    // Retry only when no pipe handle was opened and no bytes could be sent.
+    // Never replay a possibly executed operation; production GUI tries once.
+    for(int i=0;i<20;++i){
+        std::string message=argv[1];const auto result=send_teacher_request(message);
+        if(result=="accepted")return 0;
+        if(result!="notready")return 2;
+        Sleep(500);
+    }
+    std::fputs("trusted request pipe unavailable\n",stderr);return 3;
 }

@@ -1,21 +1,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <string>
+#include "request_client.hpp"
 #include "../src/policy.hpp"
 namespace {
 HWND site_edit=nullptr,pin_edit=nullptr;
 std::string utf8(const std::wstring& text){
  if(text.empty())return {};int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),nullptr,0,nullptr,nullptr);
  if(n<=0)return {};std::string s(static_cast<std::size_t>(n),'\0');if(!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),s.data(),n,nullptr,nullptr))return {};return s;
-}
-std::string send(std::string& message){
- HANDLE pipe=CreateFileW(L"\\\\.\\pipe\\OhnoWebsiteRequest",FILE_READ_DATA|FILE_WRITE_DATA|SYNCHRONIZE,0,nullptr,OPEN_EXISTING,0,nullptr);
- if(pipe==INVALID_HANDLE_VALUE){SecureZeroMemory(message.data(),message.size());return "unavailable";}
- DWORD sent=0;BOOL ok=WriteFile(pipe,message.data(),static_cast<DWORD>(message.size()),&sent,nullptr);
- SecureZeroMemory(message.data(),message.size());
- char reply[64]{};DWORD count=0;if(ok)ok=ReadFile(pipe,reply,sizeof(reply),&count,nullptr);
- if(ok){char ack='1';DWORD n=0;WriteFile(pipe,&ack,1,&n,nullptr);}CloseHandle(pipe);
- return ok?std::string(reply,count):"unavailable";
 }
 LRESULT CALLBACK handler(HWND window,UINT msg,WPARAM wp,LPARAM lp){
  if(msg==WM_CREATE){
@@ -31,14 +23,14 @@ LRESULT CALLBACK handler(HWND window,UINT msg,WPARAM wp,LPARAM lp){
   wchar_t text[254]{};int len=GetWindowTextW(site_edit,text,254);std::string host;
   for(int i=0;i<len;++i){wchar_t c=text[i];if(c>=L'A'&&c<=L'Z')c+=L'a'-L'A';if(c>127){host.clear();break;}host+=static_cast<char>(c);}
   if(!ohno::valid_hostname(host)){MessageBoxW(window,L"请输入域名，不要输入 https:// 或路径。",L"ohno",MB_OK|MB_ICONWARNING);return 0;}
-  std::string payload="W:"+host;auto result=send(payload);
+  std::string payload="W:"+host;auto result=send_teacher_request(payload);
   MessageBoxW(window,result=="accepted"?L"申请已提交至教师端。":L"无法提交。请检查服务、设备审批和网络。",L"ohno",MB_OK|(result=="accepted"?MB_ICONINFORMATION:MB_ICONERROR));return 0;
  }
  if(msg==WM_COMMAND&&LOWORD(wp)==4){
   wchar_t text[129]{};int len=GetWindowTextW(pin_edit,text,129);SetWindowTextW(pin_edit,L"");
   std::wstring pin(text,static_cast<std::size_t>(len));SecureZeroMemory(text,sizeof(text));std::string encoded=utf8(pin);SecureZeroMemory(pin.data(),pin.size()*sizeof(wchar_t));
   if(encoded.size()<4||encoded.size()>8||encoded.find_first_not_of("0123456789")!=std::string::npos){SecureZeroMemory(encoded.data(),encoded.size());MessageBoxW(window,L"请输入 4–8 位数字 PIN。",L"ohno",MB_OK|MB_ICONWARNING);return 0;}
-  std::string payload="U:"+encoded;SecureZeroMemory(encoded.data(),encoded.size());auto result=send(payload);
+  std::string payload="U:"+encoded;SecureZeroMemory(encoded.data(),encoded.size());auto result=send_teacher_request(payload);
   MessageBoxW(window,result=="accepted"?L"PIN 验证通过，本机限制将在同步后暂停一小时。":result=="denied"?L"验证失败或尝试次数过多。":L"无法联系教师端。",L"ohno",MB_OK|(result=="accepted"?MB_ICONINFORMATION:MB_ICONERROR));return 0;
  }
  if(msg==WM_DESTROY){PostQuitMessage(0);return 0;}return DefWindowProcW(window,msg,wp,lp);
