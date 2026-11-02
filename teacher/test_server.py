@@ -50,6 +50,9 @@ class TeacherIntegration(unittest.TestCase):
         self.store = Store.initialize(root/'state.json')
         self.api.store = self.control.store = self.store
 
+    def tearDown(self):
+        self.store.close()
+
     @classmethod
     def tearDownClass(cls):
         for server in (cls.api,cls.control): server.shutdown(); server.server_close()
@@ -93,6 +96,66 @@ class TeacherIntegration(unittest.TestCase):
     def maintenance_request(self, password='A classroom maintenance phrase!', action='install', auth=None, nonce='c'*64):
         return self.api_req('POST', '/api/maintenance/authorize', json.dumps({
             'action': action, 'nonce': nonce, 'maintenance_password': password}), auth)
+
+    def test_release_approval_pause_and_device_boundaries(self):
+        from test_update_package import fixture_package
+        from update_manifest import verify_manifest
+        payload = fixture_package()
+        headers = {'Content-Type': 'application/octet-stream', 'X-Ohno-CSRF': self.csrf()}
+        self.assertEqual(self.control_req('POST', '/updates/approve', payload, dict(headers, **{'X-Ohno-CSRF': 'wrong'}))[0], 403)
+        self.assertFalse(self.store.release_directory.exists())
+        self.assertEqual(self.api_req('POST', '/updates/initialize', urlencode({'csrf': self.csrf()}))[0], 404)
+        self.form('/updates/initialize', {'csrf': self.csrf()})
+        self.assertIsNotNone(self.store.release_catalog)
+        self.assertIsNone(self.store.data.get('maintenance_credential')) # daily release approval is NOT a password gate
+        device = self.approved_device()
+        request = {'device_id': device['X-Ohno-Device'], 'device_key': device['X-Ohno-Key'], 'nonce': 'd'*64}
+        def ask(path, values=None, raw=False):
+            return self.api_req('POST', '/api/device/update/'+path, json.dumps(request if values is None else values), raw=raw)
+        self.assertEqual(ask('offer')[0], 404)
+        self.assertEqual(self.control_req('POST', '/updates/approve', b'bad', headers)[0], 400)
+        status, _, text = self.control_req('POST', '/updates/approve', payload, headers)
+        self.assertEqual(status, 200, text);approved = json.loads(text)
+        self.assertEqual(approved['sequence'], 1)
+        status, _, document = ask('offer');self.assertEqual(status, 200)
+        offer = verify_manifest(document, self.store.release_catalog.public_key, installed_sequence=0, updater_version=1, now=int(__import__('time').time()))
+        path = 'package/' + offer['sha256']
+        self.assertEqual(ask(path, raw=True)[2], payload)
+        slots=self.store.release_download_slots
+        self.assertTrue(slots.acquire(blocking=False));self.assertTrue(slots.acquire(blocking=False))
+        try:self.assertEqual(ask(path)[0],503)
+        finally:slots.release();slots.release()
+        dev=self.store.data['devices'][request['device_id']]
+        original_macs=dev['macs'];dev['macs']=['00:15:5d:11:22:33']
+        self.assertEqual(ask('offer')[0],403);dev['macs']=original_macs
+        def revoke_during_read(*args,**kwargs):
+            dev['approved']=False
+            return payload
+        with patch.object(self.store.release_catalog,'package',side_effect=revoke_during_read):
+            self.assertEqual(ask(path)[0],403)
+        self.form('/device', {'csrf': self.csrf(), 'id': request['device_id'], 'approved': '1'})
+        self.assertEqual(ask('package/../release-key.pem')[0], 404)
+        execution = dict(request, sequence=offer['sequence'], sha256=offer['sha256'])
+        status, _, text = ask('authorize', execution);self.assertEqual(status, 200)
+        decision = json.loads(text)
+        self.assertEqual(decision['nonce'], request['nonce']);self.assertEqual(decision['device_id'], request['device_id'])
+        self.assertEqual(decision['expires_at']-decision['authorized_at'], 120)
+        self.assertEqual(ask('authorize', dict(execution, sequence=True))[0], 403)
+        self.assertEqual(ask('authorize', dict(execution, sha256='f'*64))[0], 403)
+        self.assertEqual(ask('offer', dict(request, device_key='wrong'*8))[0], 403)
+        duplicate = json.dumps(request)[:-1]+',"nonce":"'+'d'*64+'"}'
+        self.assertEqual(self.api_req('POST','/api/device/update/offer',duplicate)[0],400)
+        self.form('/updates/pause', {'csrf': self.csrf()})
+        for path_name, values in [('offer',request),(path,request),('authorize',execution)]:
+            self.assertEqual(ask(path_name,values)[0],404)
+        self.assertEqual(self.control_req('POST', '/updates/approve', payload, headers)[0],200)
+        self.assertEqual(ask('authorize',execution)[0],403) # same bytes, newer approval sequence
+        self.form('/device', {'csrf': self.csrf(), 'id': request['device_id'], 'approved': '0'})
+        for path_name in ['offer',path]:self.assertEqual(ask(path_name)[0],403)
+        status, response_headers, script=self.control_req('GET','/updates.js')
+        self.assertEqual(status,200);self.assertIn("redirect: 'error'",script)
+        self.assertEqual(self.api_req('GET','/updates.js')[0],404)
+        self.assertIn("script-src 'self'",response_headers['Content-Security-Policy'])
 
     def test_maintenance_control_and_authorization_are_separate(self):
         self.assertEqual(self.maintenance_request()[0], 403)

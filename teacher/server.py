@@ -21,6 +21,8 @@ from pathlib import Path
 from urllib.parse import parse_qs
 from school_installer import HOSTNAME, build_school_installer, enrollment_origin
 from maintenance import MaintenanceGuard, create_credential, parse_authorization_request
+from update_catalog import CatalogError, ReleaseCatalog
+from update_manifest import MAX_PACKAGE_SIZE
 
 MAX_BODY = 65536
 MAX_REQUESTS = 10000
@@ -75,6 +77,16 @@ class Store:
         self.lock = threading.RLock()
         self.attempts = {}
         self.maintenance_guard = MaintenanceGuard()
+        self.release_directory = self.path.with_name(self.path.stem + '.releases')
+        self.release_catalog = None
+        self.release_error = False
+        self.release_download_slots = threading.BoundedSemaphore(2)
+        if self.release_directory.exists():
+            try:
+                self.release_catalog = ReleaseCatalog(self.release_directory)
+            except (OSError, ValueError, CatalogError):
+                # Never replace lost/corrupt school signing identity automatically.
+                self.release_error = True
         self._committed = self.path.read_text('utf-8')
         self.data = json.loads(self._committed)
         if self.data.get('version') != 1:
@@ -146,6 +158,17 @@ class Store:
                         os.unlink(name)
                     except OSError:
                         pass
+
+    def initialize_releases(self):
+        with self.lock:
+            if self.release_catalog is not None or self.release_directory.exists():
+                raise CatalogError('release trust already exists; restore rather than regenerate')
+            self.release_catalog = ReleaseCatalog.initialize(self.release_directory)
+            self.release_error = False
+
+    def close(self):
+        if self.release_catalog is not None:
+            self.release_catalog.close()
 
     def set_unlock_pin(self, pin):
         with self.lock:
@@ -328,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         self.send_header('Referrer-Policy', 'no-referrer')
         for key, value in headers:
             self.send_header(key, value)
@@ -338,12 +361,14 @@ class Handler(BaseHTTPRequestHandler):
     def json_reply(self, status, value):
         self.reply(status, json.dumps(value, ensure_ascii=False), 'application/json; charset=utf-8')
 
-    def read_body(self):
+    def read_body(self, limit=MAX_BODY):
+        if self.headers.get('Transfer-Encoding') is not None or len(self.headers.get_all('Content-Length', [])) != 1:
+            return None
         try:
             length = int(self.headers.get('Content-Length', '-1'))
         except ValueError:
             return None
-        if length < 0 or length > MAX_BODY:
+        if length < 0 or length > limit:
             return None
         body = self.rfile.read(length)
         return body if len(body) == length else None
@@ -372,6 +397,8 @@ class Handler(BaseHTTPRequestHandler):
                     'block_local_files': data.get('block_local_files', False), 'grants': grants})
         if not self.is_control():
             return self.reply(404, 'Not found')
+        if self.path == '/updates.js':
+            return self.reply(200, (Path(__file__).with_name('update_ui.js')).read_bytes(), 'application/javascript; charset=utf-8')
         if self.path == '/school-installer':
             setup_exe = getattr(self.server, 'school_installer_exe', None)
             origin = getattr(self.server, 'enrollment_origin', None)
@@ -433,6 +460,24 @@ class Handler(BaseHTTPRequestHandler):
             req_rows.append('<tr><td>' + esc(item['device_id'][:12]) + '</td><td>' + esc(item['kind']) + '</td><td>' + esc(item.get('label') or item['object']) + (' <small>' + esc(item['object']) + '</small>' if item.get('label') else '') + '</td><td>' + esc(item['state']) + '</td><td>' + action + '</td></tr>')
         content = '<h1>ohno 教师端</h1><p>仅本机可管理 · 策略版本 ' + str(revision) + '</p>'
         content += '<section><h2>教师维护密码（安装 / 卸载）</h2><p>仅用于新增安装 / 卸载授权，不是后台登录或课堂 PIN。镜像分发后的启动不重复输入。支持一句话式长口令，不要求大小写或符号组合。当前：<strong>' + ('已设置' if maintenance_enabled else '未设置，维护授权拒绝') + '</strong></p><p><small>配套新版安装器在安装 / 卸载时在线验证此密码；已发布的 alpha.6 旧安装器不具备此保护。系统管理员仍可进行标准 Windows 恢复。</small></p><form method="post" action="/maintenance-password">' + hidden + '<input name="maintenance_password" type="password" aria-label="教师维护密码" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12–128 字符的维护密码"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear" formnovalidate>停用维护授权</button></form></section>'
+        with self.store.lock:
+            catalog = self.store.release_catalog
+            release_error = self.store.release_error
+            try:
+                offer = catalog.offer() if catalog else None
+            except (OSError, ValueError, CatalogError):
+                release_error = True
+                offer = None
+        content += '<section><h2>客户端升级（配套更新运行时仍在开发）</h2><p>只下发教师明确批准的本地构建，不自动信任 GitHub latest。日常批准不重复输入维护密码。</p>'
+        if release_error:
+            content += '<p>发布状态或签名密钥不可用；升级拒绝。请恢复原状态，勿生成新身份冒充旧学校。</p>'
+        elif catalog is None:
+            content += '<p>尚未初始化独立发布签名身份。私钥仅留在教师机，公开验证钥可进入学校镜像。</p><form method="post" action="/updates/initialize">' + hidden + '<button>初始化本校发布信任</button></form>'
+        else:
+            content += '<p>当前：' + (esc(offer['version']) + ' / 序号 ' + str(offer['sequence']) if offer else '暂停或无有效批准') + '</p><p><small>公开验证钥：' + esc(catalog.public_key) + '</small></p>'
+            content += '<form id="update-approval">' + hidden + '<input type="file" accept=".ohno" aria-label="本地 OHNO 更新包" required> <button type="submit">验证并批准此包</button> <button type="button" id="cancel-update-upload" disabled>取消请求</button></form><p id="update-upload-status" role="status"></p><script src="/updates.js" defer></script>'
+            content += '<form method="post" action="/updates/pause">' + hidden + '<button>暂停下发与执行授权</button></form>'
+        content += '</section>'
         content += '<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；后台管理仅在教师机本地开放并免登录。当前：<strong>' + ('已启用' if pin_enabled else '关闭') + '</strong></p><form method="post" action="/unlock-pin">' + hidden + '<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>'
         content += '<section><h2>网站与程序规则</h2><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件</label></p><button>保存规则</button></form></section>'
         if getattr(self.server, 'school_installer_exe', None) and getattr(self.server, 'enrollment_origin', None):
@@ -444,25 +489,55 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             return self._do_post()
-        except StateSaveError:
+        except (StateSaveError, CatalogError, OSError):
             if self.path.startswith('/api/'):
                 return self.json_reply(503, {'error': 'state unavailable; retry later'})
             return self.reply(503, '保存失败，修改未生效。请检查磁盘和文件权限后重试。')
 
     def _do_post(self):
-        raw = self.read_body()
+        if self.path == '/updates/approve':
+            if not self.is_control():
+                return self.reply(404, 'Not found')
+            token = self.headers.get('X-Ohno-CSRF', '')
+            if not hmac.compare_digest(self.server.control_csrf.encode('utf-8'), token.encode('utf-8')):
+                return self.reply(403, 'Invalid CSRF token')
+            if self.headers.get('Content-Type') != 'application/octet-stream':
+                return self.reply(400, 'Expected binary update package')
+            # Check control/CSRF before accepting the potentially large body.
+            raw = self.read_body(MAX_PACKAGE_SIZE)
+            if raw is None:
+                return self.reply(413, 'Invalid update length')
+            with self.store.lock:
+                if self.store.release_catalog is None:
+                    return self.reply(409, 'Initialize release trust first')
+                try:
+                    approved = self.store.release_catalog.approve(raw)
+                except ValueError:
+                    return self.reply(400, 'Invalid x64 update package')
+            return self.json_reply(200, {'approved': True, 'sequence': approved['sequence'], 'sha256': approved['sha256']})
+        raw = self.read_body(2048 if self.path.startswith('/api/device/update/') else MAX_BODY)
         if raw is None:
             return self.reply(413, 'Invalid request length')
         if self.path.startswith('/api/device/') or self.path == '/api/maintenance/authorize':
             if getattr(self.server, 'control', False):
                 return self.reply(404, 'Not found')
             try:
-                data = parse_authorization_request(raw) if self.path == '/api/maintenance/authorize' else json.loads(raw)
+                def unique_fields(pairs):
+                    value = {}
+                    for key, item in pairs:
+                        if key in value:
+                            raise ValueError('duplicate request field')
+                        value[key] = item
+                    return value
+                data = (parse_authorization_request(raw) if self.path == '/api/maintenance/authorize'
+                        else json.loads(raw.decode('utf-8'), object_pairs_hook=unique_fields))
                 if not isinstance(data, dict): raise ValueError()
             except (ValueError, UnicodeError, RecursionError):
                 return self.json_reply(400, {'error': 'invalid JSON'})
             if self.path == '/api/maintenance/authorize':
                 return self.maintenance_authorization(data)
+            if self.path.startswith('/api/device/update/'):
+                return self.device_update(data)
             if self.path == '/api/device/register':
                 return self.register(data)
             if self.path == '/api/device/request':
@@ -479,6 +554,15 @@ class Handler(BaseHTTPRequestHandler):
         one = lambda key: form.get(key, [''])[0]
         if not hmac.compare_digest(self.server.control_csrf.encode('utf-8'), one('csrf').encode('utf-8')):
             return self.reply(403, 'Invalid CSRF token')
+        if self.path == '/updates/initialize':
+            self.store.initialize_releases()
+            return self.redirect('/')
+        if self.path == '/updates/pause':
+            with self.store.lock:
+                if self.store.release_catalog is None:
+                    return self.reply(409, 'No release trust')
+                self.store.release_catalog.pause()
+            return self.redirect('/')
         if self.path == '/maintenance-password':
             if one('action') not in ('set', 'clear'):
                 return self.reply(400, 'Invalid maintenance action')
@@ -536,10 +620,55 @@ class Handler(BaseHTTPRequestHandler):
             self.store.save()
         return self.redirect('/')
 
+    def device_update(self, data):
+        # Native callers put credentials in this POST body only after validating
+        # the actual TLS connection. No device secrets in URLs or redirects.
+        fields = {'device_id', 'device_key', 'nonce'}
+        execute = self.path == '/api/device/update/authorize'
+        if execute:
+            fields |= {'sequence', 'sha256'}
+        if (set(data) != fields or not all(isinstance(data.get(x), str) for x in ('device_id', 'device_key', 'nonce')) or
+                not ID.fullmatch(data['device_id']) or not ID.fullmatch(data['device_key']) or not HASH.fullmatch(data['nonce'])):
+            return self.json_reply(400, {'error': 'invalid update request'})
+        with self.store.lock:
+            if not self.store.device(data['device_id'], data['device_key']):
+                return self.json_reply(403, {'error': 'device not approved or MAC changed'})
+            catalog = self.store.release_catalog
+            if catalog is None:
+                return self.json_reply(503, {'error': 'release trust unavailable'})
+            offer = catalog.offer()
+            if offer is None:
+                return self.json_reply(404, {'error': 'no currently approved release'})
+            if self.path == '/api/device/update/offer':
+                return self.json_reply(200, offer)
+            if execute:
+                if type(data['sequence']) is not int or data['sequence'] != offer['sequence'] or data['sha256'] != offer['sha256']:
+                    return self.json_reply(403, {'error': 'release approval changed'})
+                now = int(time.time())
+                return self.json_reply(200, {'authorized': True, 'nonce': data['nonce'], 'device_id': data['device_id'],
+                    'sequence': offer['sequence'], 'sha256': offer['sha256'], 'authorized_at': now, 'expires_at': now+120})
+            if self.path != '/api/device/update/package/' + offer['sha256']:
+                return self.json_reply(404, {'error': 'unknown update path'})
+        # Bounded large transfers do not hold the policy/teacher control lock.
+        # Recheck revocation after disk verification and before starting output.
+        if not self.store.release_download_slots.acquire(blocking=False):
+            return self.json_reply(503, {'error': 'download capacity; retry later'})
+        try:
+            payload = catalog.package(offer['sha256'])
+            with self.store.lock:
+                if not self.store.device(data['device_id'], data['device_key']):
+                    return self.json_reply(403, {'error': 'device authorization changed'})
+                current = catalog.offer()
+                if payload is None or current is None or current['sequence'] != offer['sequence']:
+                    return self.json_reply(404, {'error': 'release no longer approved'})
+            return self.reply(200, payload, 'application/octet-stream')
+        finally:
+            self.store.release_download_slots.release()
+
     def maintenance_authorization(self, data):
         # This response is a nonce-bound online decision, not a bearer token.
         # New installers must verify TLS, compare action/nonce/device/expiry and
-        # use it immediately; existing clients do not call this endpoint yet.
+        # use it immediately; legacy alpha.6 clients do not call this endpoint.
         # parse_authorization_request has already enforced fields and types.
         # New native callers keep ALL secrets in the body, written only after
         # certificate verification on the same WinHTTP request. Header support
@@ -705,6 +834,7 @@ def serve_teacher(state, cert, key, bind, port, enrollment_host=None, open_brows
         finally:
             api.shutdown()
             api_thread.join(timeout=5)
+            store.close()
 
 
 def easy_start():

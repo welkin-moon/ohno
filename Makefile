@@ -25,7 +25,9 @@ update-manifest-test: tests/update_manifest_test.cpp src/update_manifest.hpp src
 	$(CXX) $(CXXFLAGS) -Isrc tests/update_manifest_test.cpp -o $@
 update-transaction-test: tests/update_transaction_test.cpp src/update_transaction.hpp src/update_manifest.hpp src/json.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/update_transaction_test.cpp -o $@
-test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test
+update-package-test: tests/update_package_test.cpp src/update_package.hpp src/update_manifest.hpp src/json.hpp
+	$(CXX) $(CXXFLAGS) -Isrc tests/update_package_test.cpp -o $@
+test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test
 	./policy-test
 	./json-test
 	./smbios-test
@@ -36,5 +38,6 @@ test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-
 	./approval-queue-test
 	./update-manifest-test
 	./update-transaction-test
+	./update-package-test
 clean:
-	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test
+	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test
