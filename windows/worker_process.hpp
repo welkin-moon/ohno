@@ -14,7 +14,10 @@ void set_worker_test_hooks(void(*hook)(unsigned,DWORD),bool fail_drain=false);
 class WorkerProcess {
     struct Impl;std::unique_ptr<Impl> impl;
 public:
-    WorkerProcess(WindowsUpdateJournal& storage,const UpdateRevision& revision,
+    WorkerProcess();
+    // Object ownership exists BEFORE any child creation, so failed startup
+    // still has to pass the same explicit drain gate as an unhealthy worker.
+    void start(WindowsUpdateJournal& storage,const UpdateRevision& revision,
         const std::string& pinned_key,const std::string& transaction,HANDLE host_stop,ULONGLONG not_after=0);
     ~WorkerProcess();
     WorkerProcess(const WorkerProcess&)=delete;

@@ -55,7 +55,7 @@ def main():
                 directory.mkdir(exist_ok=True)
                 value={'root':str(directory),'initialize':initialize,'baseline':str(baseline),'server':server.origin,
                     'certificate':(root/'cert.pem').read_text(),'public_key':public,'device_id':DEVICE,'device_key':KEY,
-                    'stop_ms':20000,'crash':0,'stop_at':0,'fail_drain':False,'stop_after_poll':True,'stop_after_rollback':False}
+                    'stop_ms':20000,'crash':0,'stop_at':0,'fail_drain':False,'fail_start':False,'fail_drain_on_start':False,'stop_after_poll':True,'stop_after_rollback':False}
                 value.update(overrides);return value
             def run(directory,expected=0,**overrides):
                 result=subprocess.run([client],input=json.dumps(config(directory,**overrides)),text=True,capture_output=True,timeout=30)
@@ -93,6 +93,13 @@ def main():
             offer();directory=root/'drain-unconfirmed';value=run(directory,expected=1,fail_drain=True)
             assert value['phase']=='prepared' and value['high_water']==7,value
             assert not any(' start 7 ' in line for line in events(directory));stopped(directory)
+            offer();directory=root/'start-failed';value=run(directory,fail_start=True,stop_after_poll=False,stop_after_rollback=True)
+            state_is(value,0,7);assert sum(' start 0 ' in line for line in events(directory))==2;stopped(directory)
+            # Inject uncertain drain specifically after a child was created but
+            # never resumed. It must not be misclassified as ordinary rollback.
+            offer();directory=root/'start-drain-unconfirmed';value=run(directory,expected=1,fail_start=True,fail_drain_on_start=True)
+            assert value['phase']=='probation',value
+            assert sum(' start 0 ' in line for line in events(directory))==1;stopped(directory)
             # Journal corruption never resets identity/floor or launches fallback.
             offer();directory=root/'corrupt';state_is(run(directory),7,7);before=len(events(directory))
             (directory/'update-state.json').write_text('{truncated')

@@ -28,7 +28,7 @@ void run_update_runtime(const std::wstring& root,const std::string& key,HANDLE s
     std::unique_ptr<WorkerProcess> worker;
     auto drain=[&]{if(worker&&!worker->stop())throw std::runtime_error("worker tree did not drain; no next version may start");worker.reset();};
     auto launch=[&](const UpdateRevision& revision,const std::string& transaction){
-        worker=std::make_unique<WorkerProcess>(storage,revision,key,transaction,stop);
+        worker=std::make_unique<WorkerProcess>();worker->start(storage,revision,key,transaction,stop);
         UpdateHealth proof;return worker->healthy(stop,options.health_timeout_ms,proof);
     };
     unsigned restarts=0;ULONGLONG restart_window=GetTickCount64(),next_poll=0;
@@ -67,7 +67,7 @@ void run_update_runtime(const std::wstring& root,const std::string& key,HANDLE s
                 persist(activate_update(state,state.transaction));checkpoint(options,5);
                 bool healthy=false;UpdateHealth proof;
                 try{
-                    worker=std::make_unique<WorkerProcess>(storage,state.active,key,state.transaction,stop,authorized_until);checkpoint(options,6);
+                    worker=std::make_unique<WorkerProcess>();worker->start(storage,state.active,key,state.transaction,stop,authorized_until);checkpoint(options,6);
                     healthy=worker->healthy(stop,options.health_timeout_ms,proof);
                 }catch(...){healthy=false;}
                 if(healthy&&!stopping(stop)){

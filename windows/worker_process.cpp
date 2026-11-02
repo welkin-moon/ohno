@@ -49,8 +49,10 @@ struct WorkerProcess::Impl {
     }
     ~Impl(){end();}
 };
-WorkerProcess::WorkerProcess(WindowsUpdateJournal& storage,const UpdateRevision& revision,
-    const std::string& key,const std::string& transaction,HANDLE host_stop,ULONGLONG not_after):impl(std::make_unique<Impl>()) {
+WorkerProcess::WorkerProcess():impl(std::make_unique<Impl>()) {}
+void WorkerProcess::start(WindowsUpdateJournal& storage,const UpdateRevision& revision,
+    const std::string& key,const std::string& transaction,HANDLE host_stop,ULONGLONG not_after) {
+    require(!impl->process.h&&!impl->job.h&&!impl->stop.h&&!impl->read.h);
     require(update_detail::lower_hex(transaction,64));uncanceled(host_stop);
     // Revalidate all extracted bytes immediately before CreateProcess. The
     // installation ACL and pinned ancestor directories are the trust boundary.
