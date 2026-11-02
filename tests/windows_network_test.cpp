@@ -14,7 +14,7 @@ int main(){
  WSADATA data{};if(WSAStartup(MAKEWORD(2,2),&data))return 1;
  SOCKET listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(listener==INVALID_SOCKET)return 2;
  sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);a.sin_port=0;
- if(bind(listener,reinterpret_cast<sockaddr*>(&a),sizeof(a))||listen(listener,4))return 3;
+ if(bind(listener,reinterpret_cast<sockaddr*>(&a),sizeof(a))||listen(listener,32))return 3;
  int size=sizeof(a);if(getsockname(listener,reinterpret_cast<sockaddr*>(&a),&size))return 4;unsigned port=ntohs(a.sin_port);
  wchar_t buffer[32768]{};DWORD n=GetFullPathNameW(L"network-target.exe",32768,buffer,nullptr);if(!n||n>=32768)return 5;
  std::wstring path(buffer,n);std::string token(64,'a');
@@ -23,6 +23,16 @@ int main(){
  if(launch(path,port)==0)return 8;
  filter.set_paused(true);if(launch(path,port)!=0)return 11;filter.set_paused(false);if(launch(path,port)==0)return 12;
  filter.apply_grants({token});if(launch(path,port)!=0)return 9;
+ // Rescanning an approved hash must not recreate its block.
+ if(filter.register_untrusted(path,token)||launch(path,port)!=0)return 13;
+ // Replacing an image at the same path must update the tracked hash, including
+ // when the replacement already has its own grant.
+ const std::string replacement(64,'b');filter.apply_grants({replacement});
+ if(filter.register_untrusted(path,replacement)||launch(path,port)!=0)return 14;
+ filter.set_paused(true);filter.apply_grants({});filter.set_paused(false);
+ if(launch(path,port)==0)return 15;
+ filter.set_paused(true);filter.apply_grants({replacement});filter.set_paused(false);
+ if(launch(path,port)!=0)return 16;
  filter.apply_grants({});if(launch(path,port)==0)return 10;
  closesocket(listener);WSACleanup();std::puts("WFP outbound block and grant test passed");return 0;
 }

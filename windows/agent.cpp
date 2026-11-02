@@ -30,6 +30,7 @@
 #include "../src/smbios.hpp"
 #include "../src/mac_identity.hpp"
 #include "../src/policy.hpp"
+#include "../src/client_policy.hpp"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -149,9 +150,6 @@ void save_policy(const std::string& value){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,KEY_WRITE,&key.h)!=ERROR_SUCCESS)throw std::runtime_error("policy key");
     if(RegSetValueExW(key.h,L"Policy",0,REG_BINARY,reinterpret_cast<const BYTE*>(value.data()),static_cast<DWORD>(value.size()))!=ERROR_SUCCESS)throw std::runtime_error("policy save");
 }
-void validate_policy(const ohno_json::value& p){
-    if(p.at("program_hashes").type!=ohno_json::value::kind::array||p.at("grants").type!=ohno_json::value::kind::array||p.at("web_domains").type!=ohno_json::value::kind::array||p.at("program_names").type!=ohno_json::value::kind::array||p.at("block_local_files").type!=ohno_json::value::kind::boolean)throw std::runtime_error("invalid policy");
-}
 std::wstring get_server(){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};
     return read_string(key.h,L"ServerUrl");
@@ -191,7 +189,14 @@ void run_agent(HANDLE stop_event){
     std::vector<std::string> tun_blocked,tun_allowed;
     try{
         get_identity();auto cached=cached_policy();
-        if(!cached.empty()){auto p=ohno_json::parse(cached);validate_policy(p);for(const auto& d:p.at("web_domains").items)if(d.type==ohno_json::value::kind::string)tun_blocked.push_back(d.text);}
+        // Temporary exceptions cannot survive a restart without online approval.
+        // Restore blocks before waiting for the first potentially slow HTTPS call.
+        if(!clear_edge_allow_policy())debug(L"ohno: cannot clear cached Edge exceptions\n");
+        if(!cached.empty()){
+            auto p=ohno::parse_client_policy(ohno_json::parse(cached));
+            tun_blocked=ohno::effective_policy(p,static_cast<std::int64_t>(std::time(nullptr)),false).domains;
+            if(!apply_edge_policy(tun_blocked))debug(L"ohno: cached Edge policy update failed\n");
+        }
     }catch(const std::exception&){debug(L"ohno: cached TUN policy unavailable\n");}
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
@@ -219,38 +224,32 @@ void run_agent(HANDLE stop_event){
                     if(!approved.boolean)debug(L"ohno: device pending approval\n");
                     else{
                         auto policy=request(server,L"GET",L"/api/device/policy",h,{});
-                        if(policy.status==200){auto candidate=ohno_json::parse(policy.body);validate_policy(candidate);save_policy(policy.body);policy_text=policy.body;online=true;}
+                        if(policy.status==200){ohno::parse_client_policy(ohno_json::parse(policy.body));save_policy(policy.body);policy_text=policy.body;online=true;}
                         else if(policy.status==403)debug(L"ohno: device approval revoked\n");
                     }
                 }
             }catch(const std::exception&){debug(L"ohno: offline; applying cached policy\n");}
             if(!policy_text.empty()){
-                auto p=ohno_json::parse(policy_text);validate_policy(p);
-                const auto& rules=p.at("program_hashes");const auto& grants=p.at("grants");const auto& web=p.at("web_domains");const auto& name_rules=p.at("program_names");
-                std::vector<std::string> domains;for(const auto& item:web.items)if(item.type==ohno_json::value::kind::string)domains.push_back(item.text);
-                if(p.at("block_local_files").boolean)domains.push_back("file://*");
-                std::vector<std::string> names;for(const auto& item:name_rules.items)if(item.type==ohno_json::value::kind::string)names.push_back(item.text);
-                std::vector<std::string> allowed,network_allowed,site_allowed;bool paused=false;
-                std::vector<std::string> blocked;for(const auto& item:rules.items)if(item.type==ohno_json::value::kind::string&&item.text.size()==64)blocked.push_back(item.text);
-                if(online)for(const auto& grant:grants.items){
-                    const auto& kind=grant.at("kind");const auto& object=grant.at("object");const auto& expiry=grant.at("expires");
-                    if(kind.type==ohno_json::value::kind::string&&object.type==ohno_json::value::kind::string&&expiry.type==ohno_json::value::kind::number){
-                        try{if(std::stoll(expiry.text)>static_cast<long long>(std::time(nullptr))){if(kind.text=="application")allowed.push_back(object.text);else if(kind.text=="network")network_allowed.push_back(object.text);else if(kind.text=="website"&&ohno::valid_hostname(object.text))site_allowed.push_back("."+object.text);else if(kind.text=="pause"&&object.text=="*")paused=true;}}catch(const std::exception&){}
-                    }
-                }
-                if(paused)domains.clear();
+                auto p=ohno::parse_client_policy(ohno_json::parse(policy_text));
+                auto active=ohno::effective_policy(p,static_cast<std::int64_t>(std::time(nullptr)),online);
+                const auto& domains=active.domains;
+                const auto& names=active.names;
+                const auto& blocked=active.hashes;
+                const auto& allowed=active.allowed_programs;
+                const auto& network_allowed=active.allowed_network;
+                const auto& site_allowed=active.allowed_sites;
+                bool paused=active.paused;
                 tun_blocked=domains;tun_allowed=site_allowed;
                 if(!tun.ensure(tun_blocked,tun_allowed))debug(L"ohno: TUN unavailable or restarting\n");
                 if(!apply_edge_policy(domains))debug(L"ohno: Edge policy update failed\n");
                 if(!apply_edge_allow_policy(site_allowed))debug(L"ohno: Edge allow policy update failed\n");
+                network.apply_grants(network_allowed);
                 network.set_paused(paused);
                 if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed,0,stop_event)){
                     auto now=GetTickCount64();auto it=last_request.find(app.hash);
                     if(it==last_request.end()||now-it->second>=60000){last_request[app.hash]=now;queued.emplace("A:"+app.hash,app.name);}
                 }
-                network.apply_grants(network_allowed);
                 if(!paused)for(const auto& app:observe_untrusted_programs(stop_event)){
-                    if(std::find(network_allowed.begin(),network_allowed.end(),app.hash)!=network_allowed.end())continue;
                     if(network.register_untrusted(app.path,app.hash)){
                         auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);
                         if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;auto split=app.path.find_last_of(L"\\/");queued.emplace(name,split==std::wstring::npos?app.path:app.path.substr(split+1));notify_network_block(app.pid);}

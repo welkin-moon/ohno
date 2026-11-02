@@ -3,6 +3,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 namespace ohno_json {
 struct value {
@@ -21,6 +22,24 @@ class parser {
     void ws(){while(i<s.size() && (s[i]==' '||s[i]=='\t'||s[i]=='\r'||s[i]=='\n')) ++i;}
     bool take(char c){ws();if(i<s.size()&&s[i]==c){++i;return true;}return false;}
     [[noreturn]] void fail(){throw std::runtime_error("invalid JSON");}
+    void validate_utf8(){
+        for(std::size_t pos=0;pos<s.size();){
+            unsigned char lead=static_cast<unsigned char>(s[pos++]);
+            if(lead<0x80)continue;
+            unsigned count=0,code=0,minimum=0;
+            if(lead>=0xc2&&lead<=0xdf){count=1;code=lead&31;minimum=0x80;}
+            else if(lead>=0xe0&&lead<=0xef){count=2;code=lead&15;minimum=0x800;}
+            else if(lead>=0xf0&&lead<=0xf4){count=3;code=lead&7;minimum=0x10000;}
+            else fail();
+            if(s.size()-pos<count)fail();
+            for(unsigned k=0;k<count;++k){
+                unsigned char next=static_cast<unsigned char>(s[pos++]);
+                if((next&0xc0)!=0x80)fail();
+                code=(code<<6)|(next&63);
+            }
+            if(code<minimum||code>0x10ffff||(code>=0xd800&&code<=0xdfff))fail();
+        }
+    }
     static void utf8(std::string& out,unsigned x){
         if(x<0x80)out.push_back(static_cast<char>(x));
         else if(x<0x800){out.push_back(static_cast<char>(0xc0|(x>>6)));out.push_back(static_cast<char>(0x80|(x&63)));}
@@ -48,7 +67,7 @@ class parser {
     }
 public:
     explicit parser(const std::string& x):s(x){}
-    value run(){if(s.size()>1024*1024)fail();value v=parse_value();ws();if(i!=s.size())fail();return v;}
+    value run(){if(s.size()>1024*1024)fail();validate_utf8();value v=parse_value();ws();if(i!=s.size())fail();return v;}
 };
 inline value parse(const std::string& s){return parser(s).run();}
 }

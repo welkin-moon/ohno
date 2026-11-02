@@ -22,7 +22,7 @@ constexpr wchar_t service_name[]=L"OhnoPrototype";
 struct sc {SC_HANDLE h=nullptr;~sc(){if(h)CloseServiceHandle(h);}};
 struct reg {HKEY h=nullptr;~reg(){if(h)RegCloseKey(h);}};
 std::wstring directory(){PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,0,nullptr,&raw)))return {};std::wstring p=raw;CoTaskMemFree(raw);return p+L"\\OhnoPrototype";}
-bool valid_url(const wchar_t* url){URL_COMPONENTSW c{};c.dwStructSize=sizeof(c);c.dwHostNameLength=DWORD(-1);c.dwUserNameLength=DWORD(-1);c.dwPasswordLength=DWORD(-1);c.dwUrlPathLength=DWORD(-1);c.dwExtraInfoLength=DWORD(-1);return WinHttpCrackUrl(url,0,0,&c)&&c.nScheme==INTERNET_SCHEME_HTTPS&&c.dwHostNameLength&&!c.dwUserNameLength&&!c.dwPasswordLength&&!c.dwExtraInfoLength&&c.dwUrlPathLength<=1;}
+bool valid_url(const wchar_t* url){for(auto p=url;*p;++p)if(*p<33||*p>126)return false;URL_COMPONENTSW c{};c.dwStructSize=sizeof(c);c.dwHostNameLength=DWORD(-1);c.dwUserNameLength=DWORD(-1);c.dwPasswordLength=DWORD(-1);c.dwUrlPathLength=DWORD(-1);c.dwExtraInfoLength=DWORD(-1);return WinHttpCrackUrl(url,0,0,&c)&&c.nScheme==INTERNET_SCHEME_HTTPS&&c.nPort!=0&&c.dwHostNameLength&&!c.dwUserNameLength&&!c.dwPasswordLength&&!c.dwExtraInfoLength&&c.dwUrlPathLength<=1;}
 // This changes machine-wide certificate trust. School administrators must
 // verify the teacher endpoint before distributing a personalized installer.
 bool import_root_context(PCCERT_CONTEXT certificate,HKEY config){
@@ -103,9 +103,10 @@ void remove_shortcut(const std::wstring& shortcut,const std::wstring& expected){
     CoUninitialize();if(remove)DeleteFileW(shortcut.c_str());
 }
 std::wstring read_config_string(HKEY key,const wchar_t* name){
-    DWORD type=0,size=0;if(RegQueryValueExW(key,name,nullptr,&type,nullptr,&size)!=ERROR_SUCCESS||type!=REG_SZ||size>65536||size<sizeof(wchar_t))return {};
-    std::wstring value(size/sizeof(wchar_t),L'\0');if(RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(value.data()),&size)!=ERROR_SUCCESS)return {};
-    while(!value.empty()&&value.back()==L'\0')value.pop_back();return value;
+    DWORD type=0,size=0;if(RegQueryValueExW(key,name,nullptr,&type,nullptr,&size)!=ERROR_SUCCESS||type!=REG_SZ||size>65536||size<sizeof(wchar_t)||size%sizeof(wchar_t))return {};
+    std::vector<wchar_t> value(size/sizeof(wchar_t)+1,0);
+    if(RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(value.data()),&size)!=ERROR_SUCCESS||type!=REG_SZ||size%sizeof(wchar_t))return {};
+    return std::wstring(value.data());
 }
 int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr){
     if(!valid_url(url)){std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
@@ -137,6 +138,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
     return result;
 }
 int remove(){
+    std::wstring dir=directory();if(dir.empty())return 1;
     sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT)};if(!manager.h)return 1;
     sc svc{OpenServiceW(manager.h,service_name,SERVICE_STOP|SERVICE_QUERY_STATUS|DELETE)};if(!svc.h){std::fwprintf(stderr,L"Service not found (%lu)\n",GetLastError());return 1;}
     SERVICE_STATUS status{};ControlService(svc.h,SERVICE_CONTROL_STOP,&status);
@@ -146,7 +148,7 @@ int remove(){
     reg cfg;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS&&!remove_imported_certificate(cfg.h)){std::fwprintf(stderr,L"Could not remove imported teacher certificate; service retained.\n");return 1;}
     std::wstring shortcut=cfg.h?read_config_string(cfg.h,L"Shortcut"):L"";
     if(!DeleteService(svc.h)){std::fwprintf(stderr,L"Cannot delete service (%lu)\n",GetLastError());return 1;}
-    std::wstring dir=directory();std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe";
+    std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe";
     remove_shortcut(shortcut,helper);
     DeleteFileW((dir+L"\\ohno-tun.json").c_str());DeleteFileW((dir+L"\\ohno-tun.json.tmp").c_str());
     DeleteFileW((dir+L"\\wintun-LICENSE.txt").c_str());DeleteFileW((dir+L"\\sing-box-LICENSE.txt").c_str());

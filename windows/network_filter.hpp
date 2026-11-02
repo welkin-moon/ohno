@@ -12,6 +12,8 @@ class NetworkFilter {
     bool paused_=false;
     GUID sublayer_{};
     std::map<std::wstring,Item> items_;
+    std::vector<std::string> allowed_;
+    bool granted(const Item& item) const;
     bool add(const std::wstring&,Item&);
     void remove(Item&);
 public:
