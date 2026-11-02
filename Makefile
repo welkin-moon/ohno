@@ -19,7 +19,9 @@ setup-bundle-test: tests/setup_bundle_test.cpp windows/setup_bundle.hpp
 	$(CXX) $(CXXFLAGS) tests/setup_bundle_test.cpp -o $@
 client-policy-test: tests/client_policy_test.cpp src/client_policy.hpp src/json.hpp src/policy.cpp src/policy.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/client_policy_test.cpp src/policy.cpp -o $@
-test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test
+approval-queue-test: tests/approval_queue_test.cpp src/approval_queue.hpp src/json.hpp src/policy.cpp src/policy.hpp
+	$(CXX) $(CXXFLAGS) -Isrc tests/approval_queue_test.cpp src/policy.cpp -o $@
+test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test
 	./policy-test
 	./json-test
 	./smbios-test
@@ -27,5 +29,6 @@ test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-
 	./mac-identity-test
 	./setup-bundle-test
 	./client-policy-test
+	./approval-queue-test
 clean:
-	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test
+	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test

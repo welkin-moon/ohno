@@ -218,6 +218,34 @@ class TeacherIntegration(unittest.TestCase):
         self.assertEqual(json.loads(self.store.path.read_text('utf-8'))['requests'],
                          loaded.data['requests'])
 
+    def test_failed_policy_save_rolls_back_and_can_retry(self):
+        original = self.store.path.read_bytes()
+        body = urlencode({'csrf': self.csrf(), 'domains': 'new.example', 'hashes': '', 'names': ''})
+        with patch('server.os.replace', side_effect=OSError('disk unavailable')):
+            self.assertEqual(self.control_req('POST', '/policy', body)[0], 503)
+        self.assertEqual(self.store.path.read_bytes(), original)
+        self.assertEqual(self.store.data, json.loads(original))
+        self.assertEqual(list(self.store.path.parent.glob('.ohno-*')), [])
+        self.assertEqual(self.control_req('POST', '/policy', body)[0], 303)
+        self.assertEqual(self.store.data['web_domains'], ['new.example'])
+        self.assertEqual(self.store.data['policy_revision'], 1)
+
+    def test_failed_registration_save_does_not_create_phantom_device(self):
+        payload = json.dumps({'id': 'Z'*24, 'key': 'Y'*32, 'name': 'new-pc'})
+        original = self.store.path.read_bytes()
+        with patch('server.tempfile.mkstemp', side_effect=OSError('disk full')):
+            self.assertEqual(self.api_req('POST', '/api/device/register', payload)[0], 503)
+        self.assertEqual(self.store.data, json.loads(original))
+        self.assertEqual(self.store.path.read_bytes(), original)
+        self.assertEqual(self.api_req('POST', '/api/device/register', payload)[0], 201)
+
+    def test_failed_pin_save_does_not_enable_unpersisted_pin(self):
+        body = urlencode({'csrf': self.csrf(), 'action': 'set', 'pin': '2468'})
+        with patch('server.os.fsync', side_effect=OSError('disk full')):
+            self.assertEqual(self.control_req('POST', '/unlock-pin', body)[0], 503)
+        self.assertIsNone(self.store.data['unlock_pin_hash'])
+        self.assertFalse(self.store.verify_unlock_pin('2468', 'test'))
+
     def test_management_is_loopback_only_and_passwordless(self):
         self.assertEqual(self.api_req('GET','/')[0],404)
         self.assertEqual(self.api_req('GET','/school-installer')[0],404)

@@ -31,6 +31,7 @@
 #include "../src/mac_identity.hpp"
 #include "../src/policy.hpp"
 #include "../src/client_policy.hpp"
+#include "../src/approval_queue.hpp"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -201,7 +202,7 @@ void run_agent(HANDLE stop_event){
     NetworkFilter network;
     if(!network.available())debug(L"ohno: WFP unavailable; outbound protection disabled\n");
     std::map<std::string,ULONGLONG> last_request;
-    std::map<std::string,std::wstring> queued;
+    ohno::ApprovalQueue queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
         bool tun_ok=tun.ensure(tun_blocked,tun_allowed);
         try{
@@ -247,22 +248,24 @@ void run_agent(HANDLE stop_event){
                 network.set_paused(paused);
                 if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed,0,stop_event)){
                     auto now=GetTickCount64();auto it=last_request.find(app.hash);
-                    if(it==last_request.end()||now-it->second>=60000){last_request[app.hash]=now;queued.emplace("A:"+app.hash,app.name);}
+                    if(it==last_request.end()||now-it->second>=60000){last_request[app.hash]=now;queued.enqueue("application",app.hash,app.name);}
                 }
                 if(!paused)for(const auto& app:observe_untrusted_programs(stop_event)){
                     if(network.register_untrusted(app.path,app.hash)){
                         auto name="N:"+app.hash;auto now=GetTickCount64();auto it=last_request.find(name);
-                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;auto split=app.path.find_last_of(L"\\/");queued.emplace(name,split==std::wstring::npos?app.path:app.path.substr(split+1));notify_network_block(app.pid);}
+                        if(it==last_request.end()||now-it->second>=60000){last_request[name]=now;auto split=app.path.find_last_of(L"\\/");queued.enqueue("network",app.hash,split==std::wstring::npos?app.path:app.path.substr(split+1));notify_network_block(app.pid);}
                     }
                 }
             }
             if(online){
-                for(auto it=queued.begin();it!=queued.end();){
-                    try{auto prefix=it->first.substr(0,2);auto kind=prefix=="N:"?"network":"application";auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(it->first.substr(2))+",\"label\":"+quoted(utf8(it->second))+"}";
-                        auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
-                        if(response.status==201)it=queued.erase(it);else break;
-                    }catch(const std::exception&){break;}
-                }
+                queued.flush([&](const std::string& kind,const std::string& object,const std::wstring& name){
+                    std::string label;
+                    try{label=ohno::approval_label(utf8(name));}catch(const std::exception&){}
+                    auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(object)+",\"label\":"+quoted(label)+"}";
+                    auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
+                    if(ohno::permanent_approval_error(response.status))debug(L"ohno: invalid approval request discarded\n");
+                    return response.status;
+                });
             }
         }catch(const std::exception&){debug(L"ohno: service iteration failed\n");}
         if(WaitForSingleObject(stop_event,15000)!=WAIT_TIMEOUT)break;
