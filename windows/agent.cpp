@@ -6,7 +6,7 @@
 #include <ws2tcpip.h> // netioapi.h requires ws2ipdef.h to expose MIB_IF_ROW2
 #include <windows.h>
 #include <iphlpapi.h>
-#include <winhttp.h>
+#include "trusted_http.hpp"
 #include <bcrypt.h>
 #include <sddl.h>
 #include <string>
@@ -39,7 +39,6 @@
 #pragma comment(lib, "iphlpapi.lib")
 namespace {
 struct reg_key { HKEY h=nullptr; ~reg_key(){if(h)RegCloseKey(h);} };
-struct http_handle { HINTERNET h=nullptr; ~http_handle(){if(h)WinHttpCloseHandle(h);} };
 void debug(const wchar_t* s){OutputDebugStringW(s);}
 std::string utf8(const std::wstring& s) {
     if(s.empty()) return {};
@@ -67,8 +66,18 @@ std::string random_hex(std::size_t count){
     std::vector<unsigned char> bytes(count);if(BCryptGenRandom(nullptr,bytes.data(),static_cast<ULONG>(bytes.size()),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0)throw std::runtime_error("random failed");
     const char* hex="0123456789abcdef";std::string result;result.reserve(count*2);for(auto b:bytes){result+=hex[b>>4];result+=hex[b&15];}return result;
 }
-struct identity{std::string id,key;std::vector<std::string> macs;};
+struct identity{std::string id,key;std::vector<std::string> macs;~identity(){if(!key.empty())SecureZeroMemory(key.data(),key.size());}};
 struct secret_text{std::string value;~secret_text(){if(!value.empty())SecureZeroMemory(value.data(),value.size());}};
+bool lower_hex(const std::string& value,std::size_t length){
+    return value.size()==length&&value.find_first_not_of("0123456789abcdef")==std::string::npos;
+}
+void begin_device_body(secret_text& body,const identity& ident,bool registration=false){
+    body.value.reserve(2048);
+    body.value=registration?"{\"id\":\"":"{\"device_id\":\"";
+    body.value+=ident.id;
+    body.value+=registration?"\",\"key\":\"":"\",\"device_key\":\"";
+    body.value+=ident.key;body.value+='"';
+}
 std::mutex identity_mutex;
 // Read NIC identities directly from the OS; DHCP IPs and route metrics are ignored.
 std::vector<std::string> network_macs(){
@@ -132,9 +141,13 @@ identity get_identity(){
     SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};reg_key key;
     LONG status=RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,nullptr,0,KEY_READ|KEY_WRITE,&sa,&key.h,nullptr);
     LocalFree(sd);if(status!=ERROR_SUCCESS)throw std::runtime_error("identity key");
-    const std::string stored=utf8(read_string(key.h,L"Credentials"));
+    auto stored_wide=read_string(key.h,L"Credentials");
+    secret_text saved; saved.value=utf8(stored_wide);
+    if(!stored_wide.empty())SecureZeroMemory(stored_wide.data(),stored_wide.size()*sizeof(wchar_t));
+    const auto& stored=saved.value;
     if(stored.size()==anchor.size()+98&&stored.compare(0,anchor.size(),anchor)==0&&
-        stored[anchor.size()]==':'&&stored[anchor.size()+33]==':')
+        stored[anchor.size()]==':'&&stored[anchor.size()+33]==':'&&
+        lower_hex(stored.substr(anchor.size()+1,32),32)&&lower_hex(stored.substr(anchor.size()+34,64),64))
         return {stored.substr(anchor.size()+1,32),stored.substr(anchor.size()+34,64),macs};
     if(!clear_edge_policy()||!clear_edge_allow_policy())throw std::runtime_error("cannot clear copied browser policy");
     RegDeleteValueW(key.h,L"Policy"); // copied policies and grants must not follow cloned credentials
@@ -156,33 +169,36 @@ std::wstring get_server(){
     reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)return {};
     return read_string(key.h,L"ServerUrl");
 }
-struct response{DWORD status=0;std::string body;};
-response request(const std::wstring& url,const wchar_t* method,const wchar_t* path,const std::wstring& headers,const std::string& body){
-    URL_COMPONENTS parts{};parts.dwStructSize=sizeof(parts);parts.dwHostNameLength=static_cast<DWORD>(-1);parts.dwSchemeLength=static_cast<DWORD>(-1);parts.dwUrlPathLength=static_cast<DWORD>(-1);parts.dwExtraInfoLength=static_cast<DWORD>(-1);parts.dwUserNameLength=static_cast<DWORD>(-1);parts.dwPasswordLength=static_cast<DWORD>(-1);
-    if(!WinHttpCrackUrl(url.c_str(),static_cast<DWORD>(url.size()),0,&parts)||parts.nScheme!=INTERNET_SCHEME_HTTPS||parts.dwHostNameLength==0||parts.dwUserNameLength||parts.dwPasswordLength||parts.dwExtraInfoLength||parts.dwUrlPathLength>1)throw std::runtime_error("invalid HTTPS URL");
-    std::wstring host(parts.lpszHostName,parts.dwHostNameLength);
-    http_handle session{WinHttpOpen(L"ohno/0.1",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0)};
-    if(!session.h)throw std::runtime_error("winhttp open");
-    WinHttpSetTimeouts(session.h,5000,5000,5000,5000);
-    http_handle conn{WinHttpConnect(session.h,host.c_str(),parts.nPort,0)};
-    if(!conn.h)throw std::runtime_error("winhttp connect");
-    http_handle req{WinHttpOpenRequest(conn.h,method,path,nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE)};
-    if(!req.h)throw std::runtime_error("winhttp request");
-    if(!WinHttpSendRequest(req.h,headers.empty()?WINHTTP_NO_ADDITIONAL_HEADERS:headers.c_str(),headers.empty()?0:static_cast<DWORD>(-1L),body.empty()?WINHTTP_NO_REQUEST_DATA:const_cast<char*>(body.data()),static_cast<DWORD>(body.size()),static_cast<DWORD>(body.size()),0)||!WinHttpReceiveResponse(req.h,nullptr))throw std::runtime_error("HTTPS request failed");
-    response out;DWORD bytes=sizeof(out.status);
-    if(!WinHttpQueryHeaders(req.h,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&out.status,&bytes,WINHTTP_NO_HEADER_INDEX))throw std::runtime_error("HTTP status failed");
-    for(;;){DWORD available=0;if(!WinHttpQueryDataAvailable(req.h,&available))throw std::runtime_error("HTTP read failed");if(!available)break;if(out.body.size()+available>1024*1024)throw std::runtime_error("response too large");std::vector<char> buf(available);DWORD n=0;if(!WinHttpReadData(req.h,buf.data(),available,&n)||n==0)throw std::runtime_error("HTTP read failed");out.body.append(buf.data(),n);}
-    return out;
+std::string get_certificate(){
+    reg_key key;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&key.h)!=ERROR_SUCCESS)throw std::runtime_error("teacher trust unavailable");
+    DWORD type=0,size=0;
+    const auto status=RegQueryValueExW(key.h,L"TeacherCertificatePem",nullptr,&type,nullptr,&size);
+    // Old OS-trusted installations may lack a pin. A PRESENT but corrupt/empty
+    // pin must never silently downgrade to system trust.
+    if(status==ERROR_FILE_NOT_FOUND)return {};
+    if(status!=ERROR_SUCCESS||type!=REG_SZ||size<2*sizeof(wchar_t)||size>32770||size%sizeof(wchar_t))throw std::runtime_error("invalid teacher trust");
+    std::vector<wchar_t> value(size/sizeof(wchar_t));
+    DWORD bytes=size;
+    if(RegQueryValueExW(key.h,L"TeacherCertificatePem",nullptr,&type,reinterpret_cast<BYTE*>(value.data()),&bytes)!=ERROR_SUCCESS||
+        type!=REG_SZ||bytes!=size||value.back()!=0||std::find(value.begin(),value.end()-1,L'\0')!=value.end()-1)throw std::runtime_error("invalid teacher trust");
+    return utf8(std::wstring(value.data(),value.size()-1));
+}
+ohno::TrustedHttpResponse device_post(const std::wstring& server,const wchar_t* path,const std::string& body,HANDLE stop){
+    const auto certificate=get_certificate();
+    const bool policy=std::wstring(path)==L"/api/device/policy";
+    const auto response=ohno::trusted_post(ohno::TrustedPost{server,certificate,path,body,policy?1024u*1024u:8192u,20000,stop});
+    if(response.failure!=ohno::TrustedHttpFailure::None)throw std::runtime_error("teacher HTTPS unavailable");
+    return response;
 }
 }
 void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool trial){
-    auto on_request=[](const std::string& payload)->std::string{
+    auto on_request=[stop_event](const std::string& payload)->std::string{
         try{
             auto server=get_server();if(server.empty())return "unavailable";auto ident=get_identity();
-            auto headers=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\nContent-Type: application/json\r\n";
             bool unlock=payload.rfind("U:",0)==0;
-            secret_text body;body.value=unlock?"{\"pin\":"+quoted(payload.substr(2))+"}":"{\"kind\":\"website\",\"object\":"+quoted(payload.substr(2))+"}";
-            auto r=request(server,L"POST",unlock?L"/api/device/unlock":L"/api/device/request",headers,body.value);
+            secret_text body;begin_device_body(body,ident);
+            body.value+=unlock?",\"pin\":"+quoted(payload.substr(2))+"}":",\"kind\":\"website\",\"object\":"+quoted(payload.substr(2))+"}";
+            auto r=device_post(server,unlock?L"/api/device/unlock":L"/api/device/request",body.value,stop_event);
             return r.status==201?"accepted":r.status==403?"denied":"unavailable";
         }catch(const std::exception&){return "unavailable";}
     };
@@ -211,23 +227,24 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
             auto ident=get_identity();auto policy_text=cached_policy();bool online=false;
-            auto h=L"X-Ohno-Device: "+wide_ascii(ident.id)+L"\r\nX-Ohno-Key: "+wide_ascii(ident.key)+L"\r\n";
             try{
                 wchar_t name[MAX_COMPUTERNAME_LENGTH+1]{};DWORD n=MAX_COMPUTERNAME_LENGTH+1;
                 std::wstring pc=GetComputerNameW(name,&n)?std::wstring(name,n):L"unknown";
                 std::string mac_json="[";
                 for(const auto& mac:ident.macs){if(mac_json.size()>1)mac_json+=",";mac_json+=quoted(mac);}
                 mac_json+="]";
-                std::string data="{\"id\":"+quoted(ident.id)+",\"key\":"+quoted(ident.key)+",\"name\":"+quoted(utf8(pc))+
-                    ",\"macs\":"+mac_json+",\"primary_mac\":"+quoted(ident.macs.empty()?"":ident.macs.front())+
+                secret_text data;begin_device_body(data,ident,true);
+                data.value+=",\"name\":"+quoted(utf8(pc))+",\"macs\":"+mac_json+
+                    ",\"primary_mac\":"+quoted(ident.macs.empty()?"":ident.macs.front())+
                     ",\"tun\":"+(tun_ok?"true":"false")+",\"wfp\":"+(network.available()?"true":"false")+"}";
-                auto reg=request(server,L"POST",L"/api/device/register",L"Content-Type: application/json\r\n",data);
+                auto reg=device_post(server,L"/api/device/register",data.value,stop_event);
                 if(reg.status==200||reg.status==201){
                     auto result=ohno_json::parse(reg.body);const auto& approved=result.at("approved");
                     if(approved.type!=ohno_json::value::kind::boolean)throw std::runtime_error("invalid registration response");
                     if(!approved.boolean)debug(L"ohno: device pending approval\n");
                     else{
-                        auto policy=request(server,L"GET",L"/api/device/policy",h,{});
+                        secret_text credentials;begin_device_body(credentials,ident);credentials.value+="}";
+                        auto policy=device_post(server,L"/api/device/policy",credentials.value,stop_event);
                         if(policy.status==200){ohno::parse_client_policy(ohno_json::parse(policy.body));save_policy(policy.body);policy_text=policy.body;online=true;}
                         else if(policy.status==403)debug(L"ohno: device approval revoked\n");
                     }
@@ -264,8 +281,9 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool
                 queued.flush([&](const std::string& kind,const std::string& object,const std::wstring& name){
                     std::string label;
                     try{label=ohno::approval_label(utf8(name));}catch(const std::exception&){}
-                    auto body="{\"kind\":"+quoted(kind)+",\"object\":"+quoted(object)+",\"label\":"+quoted(label)+"}";
-                    auto response=request(server,L"POST",L"/api/device/request",h+L"Content-Type: application/json\r\n",body);
+                    secret_text body;begin_device_body(body,ident);
+                    body.value+=",\"kind\":"+quoted(kind)+",\"object\":"+quoted(object)+",\"label\":"+quoted(label)+"}";
+                    auto response=device_post(server,L"/api/device/request",body.value,stop_event);
                     if(ohno::permanent_approval_error(response.status))debug(L"ohno: invalid approval request discarded\n");
                     return response.status;
                 });
