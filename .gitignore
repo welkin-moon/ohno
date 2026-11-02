@@ -16,3 +16,4 @@ client-policy-test
 approval-queue-test
 update-manifest-test
 update-transaction-test
+update-package-test

@@ -21,6 +21,10 @@ jobs:
         run: python3 -m unittest discover -s teacher -p 'test_*.py' -v
       - name: Test policy core
         run: make test
+      - name: Test teacher update UI interruption and repeated actions
+        run: node tests/update_ui_test.js
+      - name: Compare native and Python package validation
+        run: python tests/update_package_parity.py --client ./update-package-test
   windows-build:
     runs-on: windows-latest
     timeout-minutes: 20
@@ -52,6 +56,10 @@ jobs:
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\mac_identity_test.cpp /Fe:mac-identity-test.exe
           if errorlevel 1 exit /b 1
           mac-identity-test.exe
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\update_package_test.cpp /Fe:update-package-test.exe
+          if errorlevel 1 exit /b 1
+          update-package-test.exe
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\update_transaction_test.cpp /Fe:update-transaction-test.exe
           if errorlevel 1 exit /b 1
@@ -138,6 +146,12 @@ jobs:
       - name: Install teacher test dependencies
         shell: cmd
         run: python -m pip install -r teacher/requirements.txt
+      - name: Test teacher release catalog and private fixture-directory permissions
+        shell: cmd
+        run: python -m unittest discover -s teacher -p "test_update_*.py" -v
+      - name: Compare package parsers on Windows
+        shell: cmd
+        run: python tests\update_package_parity.py --client update-package-test.exe
       - name: Exercise native journal crash recovery in temporary NTFS directories
         shell: cmd
         run: python tests\windows_update_journal.py --client update-journal-test.exe
@@ -158,7 +172,7 @@ jobs:
         run: |
           python -m pip install pyinstaller==6.16.0 -r teacher/requirements.txt
           if errorlevel 1 exit /b 1
-          python -m PyInstaller --onefile --name ohno-teacher --add-binary "ohno-setup.exe;." teacher\server.py
+          python -m PyInstaller --onefile --name ohno-teacher --add-binary "ohno-setup.exe;." --add-data "teacher/update_ui.js;." teacher\server.py
           if errorlevel 1 exit /b 1
           dist\ohno-teacher.exe --help
           if errorlevel 1 exit /b 1
