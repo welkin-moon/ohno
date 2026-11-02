@@ -64,12 +64,17 @@ def mac_bound(dev):
     return bool(bound and bound in dev.get('macs', []))
 
 
+class StateSaveError(RuntimeError):
+    pass
+
+
 class Store:
     def __init__(self, path):
         self.path = Path(path)
         self.lock = threading.RLock()
         self.attempts = {}
-        self.data = json.loads(self.path.read_text('utf-8'))
+        self._committed = self.path.read_text('utf-8')
+        self.data = json.loads(self._committed)
         if self.data.get('version') != 1:
             raise ValueError('Unsupported state version')
         # alpha.3 used one heavyweight password for both local management and
@@ -116,16 +121,29 @@ class Store:
         return cls(p)
 
     def save(self):
-        fd, name = tempfile.mkstemp(prefix='.ohno-', dir=str(self.path.parent))
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as file:
-                json.dump(self.data, file, ensure_ascii=False, separators=(',', ':'))
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(name, self.path)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+        with self.lock:
+            name = None
+            try:
+                encoded = json.dumps(self.data, ensure_ascii=False, separators=(',', ':'))
+                fd, name = tempfile.mkstemp(prefix='.ohno-', dir=str(self.path.parent))
+                with os.fdopen(fd, 'w', encoding='utf-8') as file:
+                    file.write(encoded)
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(name, self.path)
+            except (OSError, ValueError, TypeError) as error:
+                # A failed write must not make an uncommitted policy, approval
+                # or PIN visible to subsequent requests in this process.
+                self.data = json.loads(self._committed)
+                raise StateSaveError('Cannot save teacher state') from error
+            else:
+                self._committed = encoded
+            finally:
+                if name and os.path.exists(name):
+                    try:
+                        os.unlink(name)
+                    except OSError:
+                        pass
 
     def set_unlock_pin(self, pin):
         with self.lock:
@@ -388,6 +406,14 @@ class Handler(BaseHTTPRequestHandler):
         return self.page('ohno 教师端', content)
 
     def do_POST(self):
+        try:
+            return self._do_post()
+        except StateSaveError:
+            if self.path.startswith('/api/device/'):
+                return self.json_reply(503, {'error': 'state unavailable; retry later'})
+            return self.reply(503, '保存失败，修改未生效。请检查磁盘和文件权限后重试。')
+
+    def _do_post(self):
         raw = self.read_body()
         if raw is None:
             return self.reply(413, 'Invalid request length')

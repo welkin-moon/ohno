@@ -13,3 +13,4 @@ tun-config-test
 mac-identity-test
 setup-bundle-test
 client-policy-test
+approval-queue-test

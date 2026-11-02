@@ -76,6 +76,10 @@ jobs:
           if errorlevel 1 exit /b 1
           client-policy-test.exe
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\approval_queue_test.cpp src\policy.cpp /Fe:approval-queue-test.exe
+          if errorlevel 1 exit /b 1
+          approval-queue-test.exe
+          if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\json_test.cpp /Fe:json-test.exe
           if errorlevel 1 exit /b 1
           json-test.exe
@@ -97,6 +101,10 @@ jobs:
           origin-test.exe
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_monitor_test.cpp windows\monitor.cpp /Fe:monitor-test.exe bcrypt.lib wtsapi32.lib
+          if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_hash_test.cpp windows\monitor.cpp /Fe:hash-test.exe bcrypt.lib wtsapi32.lib
+          if errorlevel 1 exit /b 1
+          hash-test.exe
           if errorlevel 1 exit /b 1
           for /f %%h in ('powershell -NoProfile -Command "(Get-FileHash test-target.exe -Algorithm SHA256).Hash.ToLower()"') do set "HASH=%%h"
           monitor-test.exe %HASH%
@@ -155,13 +163,23 @@ jobs:
             dist/ohno-teacher.exe
             dist/licenses
   publish-prerelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release v0.1.0-alpha.5]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release ')
     needs: [linux, windows-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Read and validate release version
+        id: version
+        env:
+          RELEASE_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          tag="v$(cat VERSION)"
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$'
+          if [[ ! "$tag" =~ $pattern ]]; then echo 'Invalid VERSION' >&2; exit 1; fi
+          if [[ "$RELEASE_MESSAGE" != *"[release $tag]"* ]]; then echo 'Release marker does not match VERSION' >&2; exit 1; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: ohno-client-prototype-windows-x64
@@ -173,6 +191,7 @@ jobs:
       - name: Package and publish pre-release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           cp release/client/ohno-setup.exe release/ohno-setup.exe
           cp release/teacher/ohno-teacher.exe release/ohno-teacher.exe
@@ -185,4 +204,4 @@ jobs:
           (cd release/client && zip -q ../ohno-client-windows-x64.zip ohno-setup.exe trial-guide.md AGPL-3.0.txt sing-box-LICENSE.txt wintun-LICENSE.txt)
           (cd release/teacher && zip -qr ../ohno-teacher-windows-x64.zip ohno-teacher.exe licenses trial-guide.md AGPL-3.0.txt)
           (cd release && sha256sum ohno-setup.exe ohno-teacher.exe ohno-client-windows-x64.zip ohno-teacher-windows-x64.zip > SHA256SUMS)
-          gh release create v0.1.0-alpha.5 --prerelease --target "$GITHUB_SHA" --title "ohno v0.1.0-alpha.5" --notes-file docs/release-notes.md release/ohno-setup.exe release/ohno-teacher.exe release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip release/SHA256SUMS
+          gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" --title "ohno $RELEASE_TAG" --notes-file docs/release-notes.md release/ohno-setup.exe release/ohno-teacher.exe release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip release/SHA256SUMS
