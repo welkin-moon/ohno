@@ -38,5 +38,3 @@ Windows x64 课堂助手：一个自启动服务、内网教师 Web 管理端和
 - `.github/workflows/prototype.yml`：Windows x64 编译、进程和 WFP、Edge 策略、安装卸载及教师审批集成测试，打包自包含原型。构建时校验并嵌入固定版本的上游 TUN 组件；目标电脑不会下载运行时。
 
 当前源码以仓库中的 AGPL-3.0 许可发布。上游 sing-box 与 Wintun 许可和来源见 `windows/` 中的许可证文件；安装包将随程序提供这些许可证。
-
-i an gay
