@@ -46,6 +46,15 @@ int main() {
     assert(MoveFileExW(replacement.path.c_str(), file.path.c_str(), MOVEFILE_REPLACE_EXISTING));
     const auto third = program_image_hash(file.path);
     assert(third.size() == 64 && third != first && third != second);
+    // No sleep: rapid writes may share NTFS timestamp granularity. Restoring
+    // mtime and keeping size/path/inode must never reuse an old authorization.
+    auto previous = third;
+    for (int value = 0; value != 32; ++value) {
+        write_image(file.path, static_cast<char>(value), &mtime);
+        const auto current = program_image_hash(file.path);
+        assert(current.size() == 64 && current != previous);
+        previous = current;
+    }
     HANDLE stop = CreateEventW(nullptr, TRUE, TRUE, nullptr);
     assert(stop && program_image_hash(file.path, stop).empty());
     CloseHandle(stop);

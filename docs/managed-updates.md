@@ -220,3 +220,19 @@ All credentials and keys belong only to the disposable CI fixture.
 A future explicitly triggered release also includes `ohno-update-windows-x64.ohno`
 and its SHA256SUMS entry, for teacher inspection/approval. This workflow change does
 not publish a release or change VERSION; alpha.6 downloads remain unchanged.
+
+### Native test-gate correction
+
+Inspecting complete CI logs exposed a separate program-hash regression hidden by
+`cmd`'s positive-only `if errorlevel 1`: negative abort/NTSTATUS exits could be
+followed by successful commands and a green job. Every native build/test guard
+now rejects both positive and negative failures, with an actual cmd subprocess
+regression. Earlier green job badges alone are not evidence that hash-test passed.
+
+`program_image_hash` no longer reuses digests across calls based solely on path,
+file ID, size, mtime and ChangeTime; rapid same-size rewrites can share those time
+values. It hashes current bytes under the existing writer/rename-denying handle,
+retaining STOP and 512 MiB bounds and before/after checks. Thirty-two no-sleep
+restored-mtime writes exercise this regression. This conservative correctness fix
+may increase scanning cost; safe caching and target-hardware performance still
+need separate measurement, not a weakened integrity assertion.

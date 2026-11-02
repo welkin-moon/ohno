@@ -38,6 +38,9 @@ jobs:
       - name: Install teacher test dependencies
         shell: cmd
         run: python -m pip install -r teacher/requirements.txt
+      - name: Verify native command exit gates include crash statuses
+        shell: cmd
+        run: python tests\windows_cmd_exit_test.py
       - name: Fetch pinned TUN engine
         shell: pwsh
         run: |
@@ -55,112 +58,165 @@ jobs:
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\update_configuration.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service-prototype.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp src\policy.cpp /Fe:ohno-request.exe user32.lib /link /SUBSYSTEM:WINDOWS
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\setup_bundle_test.cpp /Fe:setup-bundle-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           setup-bundle-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\mac_identity_test.cpp /Fe:mac-identity-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           mac-identity-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\update_package_test.cpp /Fe:update-package-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           update-package-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\update_transaction_test.cpp /Fe:update-transaction-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           update-transaction-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_journal.cpp windows\update_journal.cpp /Fe:update-journal-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_client.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-client-test.exe bcrypt.lib winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_worker_fixture.cpp /Fe:worker-fixture.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_runtime.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-runtime-test.exe bcrypt.lib winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_update_probe.cpp windows\update_configuration.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:installed-update-probe.exe advapi32.lib bcrypt.lib winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_maintenance_client.cpp windows\maintenance_http.cpp /Fe:maintenance-client.exe winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_test.cpp windows\request_pipe.cpp src\policy.cpp /Fe:pipe-test.exe advapi32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           pipe-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp /Fe:pipe-client.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\tun_config_emit.cpp src\policy.cpp /Fe:tun-config.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           tun-config.exe > generated-tun.json
           ohno-tun.exe check -c generated-tun.json
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_payload.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp /Fe:installed-payload-test.exe bcrypt.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           rc /fo maintenance.res windows\maintenance.rc
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE /DOHNO_PAYLOAD_MAINTENANCE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp maintenance.res /Fe:ohno-maintenance.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_launcher.cpp windows\update_configuration.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp /Fe:ohno-request-launcher.exe advapi32.lib user32.lib bcrypt.lib /link /SUBSYSTEM:WINDOWS
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           for /f %%v in (VERSION) do python teacher\update_package.py --version %%v --directory . --output ohno-initial.ohno
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           rc /fo setup.res windows\setup.rc
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /std:c++17 /EHsc /W4 /MT /Isrc tests\policy_test.cpp src\policy.cpp /Fe:policy-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           policy-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\client_policy_test.cpp src\policy.cpp /Fe:client-policy-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           client-policy-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\approval_queue_test.cpp src\policy.cpp /Fe:approval-queue-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           approval-queue-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\update_manifest_test.cpp /Fe:update-manifest-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           update-manifest-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_update_verify_test.cpp windows\update_verify.cpp /Fe:update-verify-test.exe bcrypt.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           update-verify-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\json_test.cpp /Fe:json-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           json-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_browser_policy_test.cpp windows\browser_policy.cpp src\policy.cpp /Fe:browser-policy-test.exe advapi32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           browser-policy-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_network_target.cpp /Fe:network-target.exe ws2_32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_network_test.cpp windows\network_filter.cpp /Fe:network-test.exe ws2_32.lib fwpuclnt.lib rpcrt4.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           network-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_target.cpp /Fe:test-target.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_origin_test.cpp windows\monitor.cpp /Fe:origin-test.exe bcrypt.lib wtsapi32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           origin-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_monitor_test.cpp windows\monitor.cpp /Fe:monitor-test.exe bcrypt.lib wtsapi32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_hash_test.cpp windows\monitor.cpp /Fe:hash-test.exe bcrypt.lib wtsapi32.lib
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           hash-test.exe
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           for /f %%h in ('powershell -NoProfile -Command "(Get-FileHash test-target.exe -Algorithm SHA256).Hash.ToLower()"') do set "HASH=%%h"
           monitor-test.exe %HASH%
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
       - name: Upload client prototype
         uses: actions/upload-artifact@v4
         with:
@@ -204,14 +260,19 @@ jobs:
         run: |
           python -m pip install pyinstaller==6.16.0 -r teacher/requirements.txt
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           python -m PyInstaller --onefile --name ohno-teacher --add-binary "ohno-setup.exe;." --add-data "teacher/update_ui.js;." teacher\server.py
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           dist\ohno-teacher.exe --help
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           dist\ohno-teacher.exe --generate-certificate --host localhost --cert %TEMP%\ohno-cert.pem --key %TEMP%\ohno-key.pem
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           python tests\collect_licenses.py
           if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
       - name: Upload teacher prototype
         uses: actions/upload-artifact@v4
         with:
