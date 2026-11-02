@@ -77,20 +77,26 @@ def main():
         subprocess.run([openssl,'req','-x509','-newkey','rsa:2048','-sha256','-nodes','-days','1','-keyout',str(key),'-out',str(cert),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:TRUE'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest().upper()
         ctx=ssl.create_default_context(cafile=str(cert))
-        Store.initialize(state).set_maintenance_password(maintenance_password)
+        prepared=Store.initialize(state)
+        prepared.set_maintenance_password(maintenance_password)
+        prepared.initialize_releases()
+        release_public_key=prepared.release_catalog.public_key
+        prepared.close()
         try:
             server=subprocess.Popen([sys.executable,str(root/'teacher/server.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
             waitfor(lambda:call('GET','/health')[0]==200,15)
             # Exercise the same embedded school configuration used by a double-click,
             # without a message box on the headless CI runner.
             school_setup=Path(temp)/'Ohno-School-Setup.exe'
-            school_setup.write_bytes(build_school_installer(setup.read_bytes(),'https://localhost:8443',cert.read_bytes()))
+            school_setup.write_bytes(build_school_installer(setup.read_bytes(),'https://localhost:8443',cert.read_bytes(),release_public_key))
             rejected=subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
                                     input='wrong classroom maintenance passphrase\n',text=True,timeout=30)
             if rejected.returncode==0:raise RuntimeError('incorrect password installed service')
             if subprocess.run(['sc.exe','query','OhnoPrototype'],stdout=subprocess.DEVNULL).returncode!=1060:raise RuntimeError('denied install changed service state')
             subprocess.run([str(school_setup),'--install-bundled','--password-stdin'],
                            input=maintenance_password+'\n',text=True,check=True,timeout=30);installed=True;root_installed=True
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Ohno') as config:
+                if winreg.QueryValueEx(config,'ReleasePublicKey')[0]!=release_public_key:raise RuntimeError('school release public key was not pinned at install')
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OhnoPrototype') as uninstall:
                 command=winreg.QueryValueEx(uninstall,'UninstallString')[0]
                 if 'ohno-maintenance.exe' not in command or not command.endswith(' --remove'):raise RuntimeError('normal Windows uninstall entry missing')

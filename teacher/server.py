@@ -406,7 +406,9 @@ class Handler(BaseHTTPRequestHandler):
             if not setup_exe or not origin or not cert_pem:
                 return self.reply(503, 'School installer is not available')
             try:
-                packaged = build_school_installer(Path(setup_exe).read_bytes(), origin, cert_pem)
+                with self.store.lock:
+                    public_key = self.store.release_catalog.public_key if self.store.release_catalog else None
+                packaged = build_school_installer(Path(setup_exe).read_bytes(), origin, cert_pem, public_key)
             except (OSError, ValueError):
                 return self.reply(503, 'Cannot prepare school installer')
             return self.reply(200, packaged, 'application/octet-stream',
@@ -481,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
         content += '<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；后台管理仅在教师机本地开放并免登录。当前：<strong>' + ('已启用' if pin_enabled else '关闭') + '</strong></p><form method="post" action="/unlock-pin">' + hidden + '<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>'
         content += '<section><h2>网站与程序规则</h2><form method="post" action="/policy">' + hidden + '<label>屏蔽域名<textarea name="domains">' + esc(domains) + '</textarea></label><label>屏蔽程序 SHA-256<textarea name="hashes">' + esc(hashes) + '</textarea></label><label>屏蔽程序文件名<textarea name="names">' + esc(names) + '</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"' + (' checked' if block_local_files else '') + '> 限制 Edge 打开本地文件</label></p><button>保存规则</button></form></section>'
         if getattr(self.server, 'school_installer_exe', None) and getattr(self.server, 'enrollment_origin', None):
-            content += '<section><h2>学生机一键安装</h2><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a>；复制到模板机双击、允许 UAC，再输入教师维护密码。镜像分发后不重复输入。</p><small>包内只有教师 API 地址和公开证书，没有教师 PIN、密码或私钥。</small></section>'
+            content += '<section><h2>学生机一键安装</h2><p><a href="/school-installer">下载 Ohno-School-Setup.exe</a>；复制到模板机双击、允许 UAC，再输入教师维护密码。镜像分发后不重复输入。</p><small>包内只有教师 API 地址、公开证书及已初始化的发布验证公钥，没有教师 PIN、密码或私钥。</small></section>'
         content += '<section><h2>设备</h2><p><small>MAC 用于设备关联；DHCP IP 仅显示最近地址。真正认证仍使用每机独立密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>MAC</th><th>最近 IP</th><th>状态</th><th>操作</th></tr>' + ''.join(rows) + '</table></section>'
         content += '<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>' + ''.join(req_rows) + '</table></section>'
         return self.page('ohno 教师端', content)

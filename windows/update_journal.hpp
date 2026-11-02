@@ -14,6 +14,7 @@ public:
     ~WindowsUpdateJournal();
     WindowsUpdateJournal(const WindowsUpdateJournal&) = delete;
     WindowsUpdateJournal& operator=(const WindowsUpdateJournal&) = delete;
+    const std::wstring& directory_path() const;
     std::string read() override;
     JournalWrite replace(const std::string& document) override;
     // Explicit initial installation only. Never reconstructs a missing/corrupt

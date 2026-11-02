@@ -1,7 +1,7 @@
 import unittest
 
 from school_installer import (
-    MAGIC, TRAILER, build_school_installer, enrollment_origin, get_school_configuration
+    MAGIC, TRAILER, build_school_installer, enrollment_origin, get_school_configuration, get_school_trust
 )
 
 
@@ -15,6 +15,19 @@ class SchoolInstallerTests(unittest.TestCase):
         self.assertEqual(get_school_configuration(packaged),('https://teacher-pc:8443',self.cert))
         self.assertTrue(packaged.endswith(TRAILER.pack(23,len(self.cert),MAGIC)))
         self.assertEqual(packaged[:len(self.base)],self.base)
+
+    def test_v2_binds_public_release_key_without_private_material(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from update_manifest import public_key_hex
+        key=public_key_hex(ec.generate_private_key(ec.SECP256R1()).public_key())
+        packaged=build_school_installer(self.base,'https://teacher-pc:8443',self.cert,key)
+        self.assertEqual(get_school_trust(packaged),('https://teacher-pc:8443',self.cert,key))
+        self.assertEqual(get_school_configuration(packaged),('https://teacher-pc:8443',self.cert))
+        self.assertNotIn(b'PRIVATE KEY',packaged)
+        for invalid in ['',key.upper(),'04'+'0'*128,key[:-1],key+'0']:
+            with self.assertRaises(ValueError):build_school_installer(self.base,'https://teacher-pc:8443',self.cert,invalid)
+        malformed=packaged[:-12]+bytes(4)+packaged[-8:]
+        with self.assertRaises(ValueError):get_school_trust(malformed)
 
     def test_reject_insecure_or_broken_configuration(self):
         for origin in ('http://teacher-pc:8443','https://teacher-pc:8443/path',

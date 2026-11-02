@@ -17,8 +17,7 @@ std::vector<unsigned char> decode_hex(const std::string& input) {
     return output;
 }
 }
-UpdateManifest verify_update_offer(const std::string& document, const std::string& pinned_public_key,
-    std::uint64_t installed_sequence, std::uint64_t updater_version, std::uint64_t now) {
+UpdateManifest verify_update_signature(const std::string& document, const std::string& pinned_public_key) {
     const auto manifest = parse_update_manifest(document);
     if (!update_detail::lower_hex(pinned_public_key, 130) || pinned_public_key.substr(0, 2) != "04")
         throw std::runtime_error("invalid pinned release key");
@@ -43,7 +42,11 @@ UpdateManifest verify_update_offer(const std::string& document, const std::strin
     if (BCryptVerifySignature(key.value, nullptr, hash.data(), static_cast<ULONG>(hash.size()),
             signature.data(), static_cast<ULONG>(signature.size()), 0) < 0)
         throw std::runtime_error("update signature not trusted");
-    require_new_update(manifest, installed_sequence, updater_version, now);
     return manifest;
+}
+UpdateManifest verify_update_offer(const std::string& document, const std::string& pinned_public_key,
+    std::uint64_t installed_sequence, std::uint64_t updater_version, std::uint64_t now) {
+    auto manifest=verify_update_signature(document,pinned_public_key);
+    require_new_update(manifest,installed_sequence,updater_version,now);return manifest;
 }
 }

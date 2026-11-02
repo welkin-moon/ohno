@@ -12,13 +12,13 @@
 #include <string>
 #include <vector>
 #include "maintenance_http.hpp"
+#include "trusted_http.hpp"
 #include "../src/json.hpp"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
 
 namespace {
 constexpr std::size_t max_body = 2048;
-constexpr ULONGLONG total_timeout_ms = 20000;
 
 struct http_handle {
     HINTERNET value = nullptr;
@@ -169,7 +169,7 @@ bool authorized_response(const std::string& body, const ohno::MaintenanceRequest
     return now > 0 && issued <= now + 30 && now < expires + 30;
 }
 
-bool json_content_type(HINTERNET request) {
+bool content_type(HINTERNET request, bool binary) {
     wchar_t value[128]{};
     DWORD size = sizeof(value);
     if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_HEADER_NAME_BY_INDEX,
@@ -181,7 +181,7 @@ bool json_content_type(HINTERNET request) {
     const auto delimiter = type.find(L';');
     type.resize(delimiter == std::wstring::npos ? type.size() : delimiter);
     while (!type.empty() && (type.back() == L' ' || type.back() == L'\t')) type.pop_back();
-    return type == L"application/json";
+    return type == (binary ? L"application/octet-stream" : L"application/json");
 }
 
 bool unencoded_body(HINTERNET request) {
@@ -201,12 +201,6 @@ MaintenanceResult authorize_maintenance(const MaintenanceRequest& input) noexcep
             (input.action == "install" && (!input.device_id.empty() || !input.device_key.empty())) ||
             (input.action == "uninstall" && (!lower_hex(input.device_id, 32) || !lower_hex(input.device_key, 64))))
             return MaintenanceResult::InvalidResponse;
-        std::wstring host;
-        INTERNET_PORT port = 0;
-        if (!parse_origin(input.server, host, port)) return MaintenanceResult::InvalidResponse;
-        certificate pin;
-        if (!input.certificate_pem.empty() && !parse_pin(input.certificate_pem, pin)) return MaintenanceResult::InvalidResponse;
-
         secret_body body;
         body.value.reserve(max_body); // no reallocations leaving stale secret copies
         body.value = "{\"action\":";
@@ -224,10 +218,47 @@ MaintenanceResult authorize_maintenance(const MaintenanceRequest& input) noexcep
         body.value += '}';
         if (body.value.size() > max_body) return MaintenanceResult::InvalidResponse;
 
+        const auto response=trusted_post(TrustedPost{input.server,input.certificate_pem,
+            L"/api/maintenance/authorize",body.value});
+        if(response.failure==TrustedHttpFailure::Unavailable)return MaintenanceResult::Unavailable;
+        if(response.failure!=TrustedHttpFailure::None)return MaintenanceResult::InvalidResponse;
+        if(response.status==403)return MaintenanceResult::Denied;
+        if(response.status==503)return MaintenanceResult::Unavailable;
+        if(response.status!=200)return MaintenanceResult::InvalidResponse;
+        return authorized_response(response.body,input)?MaintenanceResult::Authorized:MaintenanceResult::InvalidResponse;
+    } catch (...) {
+        // Parser/encoding/allocation errors are never authorizations. In
+        // particular, do not include attacker-controlled bodies or credentials
+        // in diagnostics, exception text, files, or event/debug logs.
+        return MaintenanceResult::InvalidResponse;
+    }
+}
+TrustedHttpResponse trusted_post(const TrustedPost& input,
+    const std::function<bool(const char*,std::size_t)>& sink) noexcept {
+    const auto failure=[](TrustedHttpFailure error){return TrustedHttpResponse{error,0,{}};};
+    try {
+        constexpr wchar_t package_prefix[]=L"/api/device/update/package/";
+        const std::wstring prefix=package_prefix;
+        bool path_ok=input.path==L"/api/maintenance/authorize"||input.path==L"/api/device/update/offer"||
+            input.path==L"/api/device/update/authorize";
+        if(input.path.compare(0,prefix.size(),prefix)==0){
+            const auto digest=input.path.substr(prefix.size());
+            path_ok=digest.size()==64&&std::all_of(digest.begin(),digest.end(),[](wchar_t c){return (c>=L'0'&&c<=L'9')||(c>=L'a'&&c<=L'f');});
+        }
+        if(!path_ok||input.body.empty()||input.body.size()>2048||!input.max_response||
+            input.max_response>268435456||input.timeout_ms<1000||input.timeout_ms>300000||
+            (input.binary&&!sink)||(!input.binary&&input.max_response>8192))return failure(TrustedHttpFailure::InvalidResponse);
+        std::wstring host;INTERNET_PORT port=0;
+        if(!parse_origin(input.server,host,port))return failure(TrustedHttpFailure::InvalidResponse);
+        certificate pin;
+        if(!input.certificate_pem.empty()&&!parse_pin(input.certificate_pem,pin))return failure(TrustedHttpFailure::InvalidResponse);
         const auto started = GetTickCount64();
+        const auto interrupted = [&] { return GetTickCount64()-started > input.timeout_ms ||
+            (input.stop_event && WaitForSingleObject(input.stop_event,0)==WAIT_OBJECT_0); };
+        if(interrupted())return failure(TrustedHttpFailure::Unavailable);
         // Direct LAN connection: do not consult proxy/PAC configuration, share
         // browser cookies, send integrated Windows credentials, or mutate trust.
-        http_handle session(WinHttpOpen(L"ohno-maintenance/1", WINHTTP_ACCESS_TYPE_NO_PROXY,
+        http_handle session(WinHttpOpen(L"ohno-trusted/1", WINHTTP_ACCESS_TYPE_NO_PROXY,
             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
         if (!session.value || !WinHttpSetTimeouts(session.value, 5000, 5000, 5000, 5000) ||
             !set_dword(session.value, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2) ||
@@ -235,20 +266,20 @@ MaintenanceResult authorize_maintenance(const MaintenanceRequest& input) noexcep
             // 127.0.0.1), before TLS/authentication/body transmission. This is
             // not an HTTP replay, and never changes the configured origin.
             !set_dword(session.value, WINHTTP_OPTION_CONNECT_RETRIES, 2) ||
-            !set_dword(session.value, WINHTTP_OPTION_MAX_RESPONSE_HEADER_SIZE, 8192)) return MaintenanceResult::Unavailable;
+            !set_dword(session.value, WINHTTP_OPTION_MAX_RESPONSE_HEADER_SIZE, 8192)) return failure(TrustedHttpFailure::Unavailable);
         http_handle connection(WinHttpConnect(session.value, host.c_str(), port, 0));
-        if (!connection.value) return MaintenanceResult::Unavailable;
-        const wchar_t* accept[] = {L"application/json", nullptr};
-        http_handle request(WinHttpOpenRequest(connection.value, L"POST", L"/api/maintenance/authorize",
+        if (!connection.value) return failure(TrustedHttpFailure::Unavailable);
+        const wchar_t* accept[] = {input.binary?L"application/octet-stream":L"application/json", nullptr};
+        http_handle request(WinHttpOpenRequest(connection.value, L"POST", input.path.c_str(),
             L"HTTP/1.1", WINHTTP_NO_REFERER, accept, WINHTTP_FLAG_SECURE));
         if (!request.value ||
             !set_dword(request.value, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_DISABLE_REDIRECTS |
                 WINHTTP_DISABLE_AUTHENTICATION | WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_KEEP_ALIVE) ||
             !set_dword(request.value, WINHTTP_OPTION_AUTOLOGON_POLICY, WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH) ||
             !WinHttpSetOption(request.value, WINHTTP_OPTION_CLIENT_CERT_CONTEXT, WINHTTP_NO_CLIENT_CERT_CONTEXT, 0))
-            return MaintenanceResult::Unavailable;
+            return failure(TrustedHttpFailure::Unavailable);
         if (pin.value && !set_dword(request.value, WINHTTP_OPTION_SECURITY_FLAGS, SECURITY_FLAG_IGNORE_UNKNOWN_CA))
-            return MaintenanceResult::Unavailable;
+            return failure(TrustedHttpFailure::Unavailable);
 
         // CRITICAL: WinHttpSendRequest performs TLS and sends ONLY non-secret
         // headers. Its optional-body pointer and length MUST remain null/zero.
@@ -258,46 +289,45 @@ MaintenanceResult authorize_maintenance(const MaintenanceRequest& input) noexcep
         // https://learn.microsoft.com/windows/win32/winhttp/option-flags
         constexpr wchar_t headers[] = L"Content-Type: application/json\r\nCache-Control: no-store\r\n";
         if (!WinHttpSendRequest(request.value, headers, static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA,
-                0, static_cast<DWORD>(body.value.size()), 0) ||
-            !authentic_server(request.value, pin) || GetTickCount64() - started > total_timeout_ms)
-            return MaintenanceResult::Unavailable;
+                0, static_cast<DWORD>(input.body.size()), 0) ||
+            !authentic_server(request.value, pin) || interrupted())
+            return failure(TrustedHttpFailure::Unavailable);
         DWORD written = 0;
         // No retry, even for ERROR_WINHTTP_RESEND_REQUEST. No secret is ever
         // supplied as optional data that WinHTTP could replay during redirects.
-        if (!WinHttpWriteData(request.value, body.value.data(), static_cast<DWORD>(body.value.size()), &written) ||
-            written != body.value.size() || !WinHttpReceiveResponse(request.value, nullptr) ||
-            GetTickCount64() - started > total_timeout_ms) return MaintenanceResult::Unavailable;
+        if (!WinHttpWriteData(request.value, const_cast<char*>(input.body.data()), static_cast<DWORD>(input.body.size()), &written) ||
+            written != input.body.size() || !WinHttpReceiveResponse(request.value, nullptr) ||
+            interrupted()) return failure(TrustedHttpFailure::Unavailable);
         DWORD status = 0, size = sizeof(status);
         if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) return MaintenanceResult::Unavailable;
-        if (status == 403) return MaintenanceResult::Denied;
-        if (status == 503) return MaintenanceResult::Unavailable;
-        if (status != 200 || !json_content_type(request.value) || !unencoded_body(request.value)) return MaintenanceResult::InvalidResponse;
+            WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) return failure(TrustedHttpFailure::Unavailable);
+        if(status>=300&&status<400)return failure(TrustedHttpFailure::InvalidResponse);
+        if(status!=200)return TrustedHttpResponse{TrustedHttpFailure::None,status,{}};
+        if(!content_type(request.value,input.binary)||!unencoded_body(request.value))return failure(TrustedHttpFailure::InvalidResponse);
         DWORD expected = 0;
         size = sizeof(expected);
         const bool has_length = WinHttpQueryHeaders(request.value, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
             WINHTTP_HEADER_NAME_BY_INDEX, &expected, &size, WINHTTP_NO_HEADER_INDEX) != FALSE;
         if ((!has_length && GetLastError() != ERROR_WINHTTP_HEADER_NOT_FOUND) ||
-            (has_length && expected > max_body)) return MaintenanceResult::InvalidResponse;
+            (has_length && expected > input.max_response)) return failure(TrustedHttpFailure::InvalidResponse);
         std::string response;
-        response.reserve(max_body);
+        if(!input.binary)response.reserve(input.max_response);
+        std::size_t total=0;
         for (;;) {
-            if (GetTickCount64() - started > total_timeout_ms) return MaintenanceResult::Unavailable;
-            char buffer[512]{};
+            if (interrupted()) return failure(TrustedHttpFailure::Unavailable);
+            char buffer[16384]{};
             DWORD count = 0;
-            if (!WinHttpReadData(request.value, buffer, sizeof(buffer), &count)) return MaintenanceResult::Unavailable;
-            if (response.size() + count > max_body) return MaintenanceResult::InvalidResponse;
+            if (!WinHttpReadData(request.value, buffer, sizeof(buffer), &count)) return failure(TrustedHttpFailure::Unavailable);
+            if (total + count > input.max_response) return failure(TrustedHttpFailure::InvalidResponse);
             if (count == 0) break;
-            response.append(buffer, count);
+            total+=count;
+            if(input.binary){if(!sink(buffer,count))return failure(TrustedHttpFailure::InvalidResponse);}
+            else response.append(buffer,count);
         }
-        if ((has_length && response.size() != expected) || GetTickCount64() - started > total_timeout_ms)
-            return MaintenanceResult::InvalidResponse;
-        return authorized_response(response, input) ? MaintenanceResult::Authorized : MaintenanceResult::InvalidResponse;
-    } catch (...) {
-        // Parser/encoding/allocation errors are never authorizations. In
-        // particular, do not include attacker-controlled bodies or credentials
-        // in diagnostics, exception text, files, or event/debug logs.
-        return MaintenanceResult::InvalidResponse;
-    }
+        if ((has_length && total != expected) || interrupted())
+            return failure(TrustedHttpFailure::InvalidResponse);
+        return TrustedHttpResponse{TrustedHttpFailure::None,status,std::move(response)};
+    } catch(...) {return failure(TrustedHttpFailure::InvalidResponse);}
 }
+
 }

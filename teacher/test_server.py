@@ -107,6 +107,10 @@ class TeacherIntegration(unittest.TestCase):
         self.assertEqual(self.api_req('POST', '/updates/initialize', urlencode({'csrf': self.csrf()}))[0], 404)
         self.form('/updates/initialize', {'csrf': self.csrf()})
         self.assertIsNotNone(self.store.release_catalog)
+        from school_installer import get_school_trust
+        installer=self.control_req('GET','/school-installer',raw=True)
+        self.assertEqual(installer[0],200)
+        self.assertEqual(get_school_trust(installer[2])[2],self.store.release_catalog.public_key)
         self.assertIsNone(self.store.data.get('maintenance_credential')) # daily release approval is NOT a password gate
         device = self.approved_device()
         request = {'device_id': device['X-Ohno-Device'], 'device_key': device['X-Ohno-Key'], 'nonce': 'd'*64}
