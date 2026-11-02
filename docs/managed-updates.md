@@ -236,3 +236,26 @@ retaining STOP and 512 MiB bounds and before/after checks. Thirty-two no-sleep
 restored-mtime writes exercise this regression. This conservative correctness fix
 may increase scanning cost; safe caching and target-hardware performance still
 need separate measurement, not a weakened integrity assertion.
+
+### Daily device transport
+
+Registration, policy polling, requests and optional classroom-PIN unlock now use
+the same native pre-body-authenticated TLS transport as maintenance/updates.
+Only four fixed POST routes are added. Device keys/PIN are in the body, never
+headers, URLs or command lines. The negotiated connection must pass exact leaf
+pin, hostname, validity and server-usage checks before secret bytes are written;
+there is no proxy, redirect, cookie, integrated authentication or body replay.
+The existing 20-second aggregate / 5-second I/O bounds and STOP signal apply.
+
+The configured PEM is public trust data. A missing pin on a legacy OS-trusted
+installation retains normal OS validation; a present but empty/malformed registry
+pin fails closed rather than downgrading. No new root-store or OS permissions are
+changed by this transport. Policy JSON retains its existing 1 MiB bound; other
+JSON routes stay limited to 8 KiB, and native inputs remain limited to 2 KiB.
+
+The teacher supports body credentials plus legacy header clients, but rejects
+mixed/partial/duplicate credentials. Approval, MAC binding, revocation and local
+control-plane separation still apply. CI adds 24 real WinHTTP cases across all
+four routes: valid 200/201 and large policy, wrong pin, expired/hostname-mismatched
+certificate, redirect and oversize. These use only loopback listeners and short-
+lived fixture secrets, no installation or trust-store changes.

@@ -239,7 +239,9 @@ TrustedHttpResponse trusted_post(const TrustedPost& input,
     try {
         constexpr wchar_t package_prefix[]=L"/api/device/update/package/";
         const std::wstring prefix=package_prefix;
-        bool path_ok=input.path==L"/api/maintenance/authorize"||input.path==L"/api/device/update/offer"||
+        const bool policy=input.path==L"/api/device/policy";
+        const bool daily=policy||input.path==L"/api/device/register"||input.path==L"/api/device/request"||input.path==L"/api/device/unlock";
+        bool path_ok=daily||input.path==L"/api/maintenance/authorize"||input.path==L"/api/device/update/offer"||
             input.path==L"/api/device/update/authorize";
         if(input.path.compare(0,prefix.size(),prefix)==0){
             const auto digest=input.path.substr(prefix.size());
@@ -247,7 +249,7 @@ TrustedHttpResponse trusted_post(const TrustedPost& input,
         }
         if(!path_ok||input.body.empty()||input.body.size()>2048||!input.max_response||
             input.max_response>268435456||input.timeout_ms<1000||input.timeout_ms>300000||
-            (input.binary&&!sink)||(!input.binary&&input.max_response>8192))return failure(TrustedHttpFailure::InvalidResponse);
+            (input.binary&&!sink)||(!input.binary&&input.max_response>(policy?1024u*1024u:8192u)))return failure(TrustedHttpFailure::InvalidResponse);
         std::wstring host;INTERNET_PORT port=0;
         if(!parse_origin(input.server,host,port))return failure(TrustedHttpFailure::InvalidResponse);
         certificate pin;
@@ -302,7 +304,7 @@ TrustedHttpResponse trusted_post(const TrustedPost& input,
         if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) return failure(TrustedHttpFailure::Unavailable);
         if(status>=300&&status<400)return failure(TrustedHttpFailure::InvalidResponse);
-        if(status!=200)return TrustedHttpResponse{TrustedHttpFailure::None,status,{}};
+        if(status!=200&&!(daily&&status==201))return TrustedHttpResponse{TrustedHttpFailure::None,status,{}};
         if(!content_type(request.value,input.binary)||!unencoded_body(request.value))return failure(TrustedHttpFailure::InvalidResponse);
         DWORD expected = 0;
         size = sizeof(expected);

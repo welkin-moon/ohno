@@ -401,22 +401,47 @@ class Handler(BaseHTTPRequestHandler):
     def page(self, title, content):
         self.reply(200, '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title>' + STYLE + '<body>' + content + '</body></html>', 'text/html; charset=utf-8')
 
+    def device_credentials(self, data=None):
+        # Current native clients send secrets only in the authenticated TLS
+        # request body. Keep old header clients compatible, but never combine
+        # two authentication sources or accept duplicate/partial credentials.
+        names = ('X-Ohno-Device', 'X-Ohno-Key')
+        if 'Authorization' in self.headers:
+            return '', ''
+        present = data is not None and ('device_id' in data or 'device_key' in data)
+        if present:
+            if any(name in self.headers for name in names):
+                return '', ''
+            dev_id, key = data.get('device_id'), data.get('device_key')
+        else:
+            if any(len(self.headers.get_all(name, [])) != 1 for name in names):
+                return '', ''
+            dev_id, key = (self.headers.get(name, '') for name in names)
+        if not all(isinstance(value, str) and ID.fullmatch(value) for value in (dev_id, key)):
+            return '', ''
+        return dev_id, key
+
+    def device_policy(self, data=None):
+        if data is not None and set(data) != {'device_id', 'device_key'}:
+            return self.json_reply(400, {'error': 'invalid policy request'})
+        dev_id, key = self.device_credentials(data)
+        with self.store.lock:
+            if not self.store.device(dev_id, key):
+                return self.json_reply(403, {'error': 'not authorized or pending'})
+            policy = self.store.data
+            grants = [dict(id=x['id'], kind=x['kind'], object=x['object'], expires=x.get('expires', 0))
+                      for x in policy['requests'] if x['device_id'] == dev_id and x['state'] == 'approved' and x.get('expires', 0) > time.time()]
+            return self.json_reply(200, {'revision': policy['policy_revision'], 'web_domains': policy['web_domains'],
+                'program_hashes': policy['program_hashes'], 'program_names': policy.get('program_names', []),
+                'block_local_files': policy.get('block_local_files', False), 'grants': grants})
+
     def do_GET(self):
         if self.path == '/health':
             return self.json_reply(200, {'ok': True, 'control': bool(getattr(self.server, 'control', False))})
         if self.path == '/api/device/policy':
             if getattr(self.server, 'control', False):
                 return self.reply(404, 'Not found')
-            dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
-            with self.store.lock:
-                if not self.store.device(dev_id, key):
-                    return self.json_reply(403, {'error': 'not authorized or pending'})
-                data = self.store.data
-                grants = [dict(id=x['id'], kind=x['kind'], object=x['object'], expires=x.get('expires',0))
-                          for x in data['requests'] if x['device_id'] == dev_id and x['state'] == 'approved' and x.get('expires',0) > time.time()]
-                return self.json_reply(200, {'revision': data['policy_revision'], 'web_domains': data['web_domains'],
-                    'program_hashes': data['program_hashes'], 'program_names': data.get('program_names', []),
-                    'block_local_files': data.get('block_local_files', False), 'grants': grants})
+            return self.device_policy()
         if not self.is_control():
             return self.reply(404, 'Not found')
         if self.path == '/updates.js':
@@ -492,7 +517,7 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, CatalogError):
                 release_error = True
                 offer = None
-        content += '<section><h2>客户端升级（配套更新运行时仍在开发）</h2><p>只下发教师明确批准的本地构建，不自动信任 GitHub latest。日常批准不重复输入维护密码。</p>'
+        content += '<section><h2>客户端升级（开发预览）</h2><p>只下发教师明确批准的本地构建，不自动信任 GitHub latest。日常批准不重复输入维护密码。须使用配套托管客户端；已发布 alpha.6 不具备自动升级。</p>'
         if release_error:
             content += '<p>发布状态或签名密钥不可用；升级拒绝。请恢复原状态，勿生成新身份冒充旧学校。</p>'
         elif catalog is None:
@@ -564,6 +589,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.device_update(data)
             if self.path == '/api/device/register':
                 return self.register(data)
+            if self.path == '/api/device/policy':
+                return self.device_policy(data)
             if self.path == '/api/device/request':
                 return self.submit_request(data)
             if self.path == '/api/device/unlock':
@@ -709,6 +736,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(200, dict(event, authorized=True))
 
     def register(self, data):
+        if any(name in self.headers for name in ('Authorization', 'X-Ohno-Device', 'X-Ohno-Key')) or 'device_id' in data or 'device_key' in data:
+            return self.json_reply(400, {'error': 'ambiguous registration credentials'})
         dev_id, key, name = data.get('id'), data.get('key'), data.get('name')
         tun, wfp = data.get('tun'), data.get('wfp')
         macs, primary = data.get('macs', []), data.get('primary_mac', '')
@@ -742,7 +771,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(201, {'approved': False})
 
     def unlock_device(self, data):
-        dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
+        dev_id, key = self.device_credentials(data)
         # Accept alpha.3's field name for a transition period, but the value is
         # now a dedicated short classroom PIN rather than a management password.
         pin = data.get('pin', data.get('password'))
@@ -761,7 +790,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(201, {'expires': item['expires']})
 
     def submit_request(self, data):
-        dev_id, key = self.headers.get('X-Ohno-Device', ''), self.headers.get('X-Ohno-Key', '')
+        dev_id, key = self.device_credentials(data)
         kind, obj = data.get('kind'), data.get('object')
         label = data.get('label', '')
         if not valid_text(label, 128, allow_empty=True) or '/' in label or '\\' in label:

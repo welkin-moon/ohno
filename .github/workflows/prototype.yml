@@ -98,10 +98,13 @@ jobs:
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_runtime.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-runtime-test.exe bcrypt.lib winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\maintenance_http.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_update_probe.cpp windows\update_configuration.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:installed-update-probe.exe advapi32.lib bcrypt.lib winhttp.lib crypt32.lib
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_device_transport.cpp windows\maintenance_http.cpp /Fe:device-transport-test.exe winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_maintenance_client.cpp windows\maintenance_http.cpp /Fe:maintenance-client.exe winhttp.lib crypt32.lib
@@ -246,6 +249,9 @@ jobs:
       - name: Exercise native TLS and maintenance protocol adversaries
         shell: cmd
         run: python tests\windows_maintenance_transport.py --client maintenance-client.exe
+      - name: Exercise daily device TLS before sending secrets
+        shell: cmd
+        run: python tests\windows_device_transport.py --client device-transport-test.exe
       - name: Exercise authorization refusals before any setup mutation
         shell: cmd
         run: python tests\windows_setup_authorization.py

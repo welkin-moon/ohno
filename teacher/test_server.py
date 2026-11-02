@@ -97,6 +97,50 @@ class TeacherIntegration(unittest.TestCase):
         return self.api_req('POST', '/api/maintenance/authorize', json.dumps({
             'action': action, 'nonce': nonce, 'maintenance_password': password}), auth)
 
+    def test_daily_body_credentials_and_legacy_compatibility(self):
+        legacy = self.approved_device()
+        credentials = {'device_id': legacy['X-Ohno-Device'], 'device_key': legacy['X-Ohno-Key']}
+        def post(path, extra=None, headers=None):
+            return self.api_req('POST', '/api/device/' + path,
+                                json.dumps(dict(credentials, **(extra or {}))), headers)
+        self.store.set_unlock_pin('2468')
+        self.assertEqual(post('policy')[0], 200)
+        self.assertEqual(post('request', {'kind': 'website', 'object': 'game.example'})[0], 201)
+        self.assertEqual(post('unlock', {'pin': '2468'})[0], 201)
+        self.assertEqual(self.api_req('GET', '/api/device/policy', headers=legacy)[0], 200)
+        self.assertEqual(self.api_req('POST', '/api/device/request', json.dumps(
+            {'kind': 'website', 'object': 'legacy.example'}), legacy)[0], 201)
+        self.assertEqual(self.api_req('POST', '/api/device/unlock', json.dumps({'pin': '2468'}), legacy)[0], 201)
+        for path, extra in [('policy', {}), ('request', {'kind': 'website', 'object': 'game.example'}),
+                            ('unlock', {'pin': '2468'})]:
+            with self.subTest(path=path):
+                before = len(self.store.data['requests'])
+                self.assertEqual(post(path, extra, legacy)[0], 403)
+                self.assertEqual(post(path, extra, {'X-Ohno-Device': credentials['device_id']})[0], 403)
+                self.assertEqual(post(path, extra, {'Authorization': 'Bearer fixture'})[0], 403)
+                invalid = dict(credentials, **extra, device_key=None)
+                self.assertEqual(self.api_req('POST', '/api/device/'+path, json.dumps(invalid))[0], 403)
+                self.assertEqual(self.control_req('POST', '/api/device/'+path,
+                                                json.dumps(dict(credentials, **extra)))[0], 404)
+                self.assertEqual(len(self.store.data['requests']), before)
+        self.assertEqual(self.api_req('POST', '/api/device/policy', json.dumps(
+            dict(credentials, extra=True)))[0], 400)
+        self.form('/device', {'csrf': self.csrf(), 'id': credentials['device_id'], 'approved': '0'})
+        self.assertEqual(post('policy')[0], 403)
+        self.assertEqual(post('request', {'kind': 'website', 'object': 'game.example'})[0], 403)
+        self.assertEqual(post('unlock', {'pin': '2468'})[0], 403)
+
+    def test_registration_rejects_ambiguous_authentication(self):
+        registration = {'id': 'c'*32, 'key': 'd'*64, 'name': 'fixture',
+                        'macs': ['00:15:5d:77:88:aa'], 'primary_mac': '00:15:5d:77:88:aa'}
+        for headers in ({'Authorization': 'Bearer fixture'}, {'X-Ohno-Key': 'd'*64},
+                        {'X-Ohno-Device': 'c'*32}):
+            self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps(registration), headers)[0], 400)
+        for extra in ({'device_id': 'c'*32}, {'device_key': 'd'*64}):
+            self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps(dict(registration, **extra)))[0], 400)
+        self.assertFalse(self.store.data['devices'])
+        self.assertEqual(self.api_req('POST', '/api/device/register', json.dumps(registration))[0], 201)
+
     def test_release_approval_pause_and_device_boundaries(self):
         from test_update_package import fixture_package
         from update_manifest import verify_manifest
