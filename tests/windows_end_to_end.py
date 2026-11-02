@@ -223,6 +223,14 @@ def main():
             publish('0.2.1-nohealth','worker-fixture.exe')
             rolled=wait_update(lambda:journal() if journal()['phase']=='stable' and journal()['high_water']==2 else None,180)
             assert rolled['active']==good['active'] and rolled['last_good']==good['active']
+            # This adversarial test worker writes its own public event trace.
+            # Confirm it actually ran and drained, then remove only this known
+            # fixture file; production cleanup must retain unknown root files.
+            fixture_log=installation/'worker-events.log'
+            fixture_events=fixture_log.read_text().splitlines()
+            assert any(' start 2 0.2.1-nohealth' in line for line in fixture_events)
+            assert any(' stop 0.2.1-nohealth' in line for line in fixture_events)
+            fixture_log.unlink()
             # Ensure failed sequence does not retry and production pipe returned.
             waitfor(lambda:subprocess.run([str(root/'pipe-client.exe'),'W:after-update.example'],stdout=subprocess.DEVNULL).returncode==0,90)
             before=journal()['generation'];time.sleep(65);assert journal()['generation']==before
