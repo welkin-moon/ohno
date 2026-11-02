@@ -28,5 +28,12 @@ int wmain(int argc,wchar_t** argv){
         if(version.find("oversize")!=std::string::npos)data=std::string(513,' ')+"\n";
         DWORD sent=0;WriteFile(pipe,data.data(),static_cast<DWORD>(data.size()),&sent,nullptr);log("proof "+version);
     }
-    CloseHandle(pipe);WaitForSingleObject(stop,INFINITE);log("stop "+version);CloseHandle(stop);return 0;
+    // An open silent writer exercises the host's actual health timeout;
+    // closed nohealth still tests early EOF as a distinct refusal.
+    const bool silent=version.find("nohealth-open")!=std::string::npos;
+    const auto silent_start=GetTickCount64();
+    if(!silent)CloseHandle(pipe);
+    WaitForSingleObject(stop,INFINITE);
+    if(silent){log("silent-ms "+std::to_string(GetTickCount64()-silent_start));CloseHandle(pipe);}
+    log("stop "+version);CloseHandle(stop);return 0;
 }

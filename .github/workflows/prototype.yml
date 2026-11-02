@@ -19,6 +19,8 @@ jobs:
         run: python3 -m pip install -r teacher/requirements.txt
       - name: Test teacher service
         run: python3 -m unittest discover -s teacher -p 'test_*.py' -v
+      - name: Compile Python test sources
+        run: python3 -m compileall -q tests
       - name: Test policy core
         run: make test
       - name: Test teacher update UI interruption and repeated actions
@@ -249,6 +251,7 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           cp release/client/ohno-setup.exe release/ohno-setup.exe
+          cp release/client/ohno-initial.ohno release/ohno-update-windows-x64.ohno
           cp release/teacher/ohno-teacher.exe release/ohno-teacher.exe
           cp docs/trial-guide.md release/client/trial-guide.md
           cp docs/trial-guide.md release/teacher/trial-guide.md
@@ -258,5 +261,5 @@ jobs:
           cp windows/wintun-LICENSE.txt release/client/wintun-LICENSE.txt
           (cd release/client && zip -q ../ohno-client-windows-x64.zip ohno-setup.exe trial-guide.md AGPL-3.0.txt sing-box-LICENSE.txt wintun-LICENSE.txt)
           (cd release/teacher && zip -qr ../ohno-teacher-windows-x64.zip ohno-teacher.exe licenses trial-guide.md AGPL-3.0.txt)
-          (cd release && sha256sum ohno-setup.exe ohno-teacher.exe ohno-client-windows-x64.zip ohno-teacher-windows-x64.zip > SHA256SUMS)
-          gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" --title "ohno $RELEASE_TAG" --notes-file docs/release-notes.md release/ohno-setup.exe release/ohno-teacher.exe release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip release/SHA256SUMS
+          (cd release && sha256sum ohno-setup.exe ohno-teacher.exe ohno-update-windows-x64.ohno ohno-client-windows-x64.zip ohno-teacher-windows-x64.zip > SHA256SUMS)
+          gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" --title "ohno $RELEASE_TAG" --notes-file docs/release-notes.md release/ohno-setup.exe release/ohno-teacher.exe release/ohno-update-windows-x64.ohno release/ohno-client-windows-x64.zip release/ohno-teacher-windows-x64.zip release/SHA256SUMS
