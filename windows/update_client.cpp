@@ -26,7 +26,10 @@ struct Download {
     std::wstring path;HANDLE file=INVALID_HANDLE_VALUE;
     explicit Download(const std::wstring& root){
         const auto random=nonce();path=root+L"\\download-"+std::wstring(random.begin(),random.end())+L".tmp";
-        file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,nullptr);
+        // Uncommitted download bytes do not need a disk flush per network
+        // fragment. finish() still flushes the complete file before validation
+        // and durable staging; interrupted downloads are never executable.
+        file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         require(file!=INVALID_HANDLE_VALUE);
     }
     ~Download(){if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);if(!path.empty())DeleteFileW(path.c_str());}

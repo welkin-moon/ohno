@@ -45,7 +45,7 @@ def main():
         baseline=root/'baseline.ohno';baseline.write_bytes(package('0.1.0'))
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'cert.pem',root/'tls.key')
         with ThreadingHTTPServer(('127.0.0.1',0),Handler) as server:
-            server.socket=context.wrap_socket(server.socket,server_side=True);server.origin='https://localhost:'+str(server.server_port)
+            server.socket=context.wrap_socket(server.socket,server_side=True);server.origin='https://127.0.0.1:'+str(server.server_port)
             server.requests=[];server.mode='normal';thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             def offer(version='0.2.0',seq=7,mode='normal'):
                 payload=package(version);now=int(time.time());server.mode=mode;server.package=payload
@@ -90,7 +90,7 @@ def main():
                 offer('0.2.0-nohealth' if point==9 else '0.2.0-descendant');directory=root/('crash-'+str(point))
                 run(directory,expected=100+point,crash=point,stop_ms=20000);stopped(directory)
                 server.mode='no_offer';state_is(run(directory,initialize=False,stop_ms=20000),7 if point==8 else 0,7);stopped(directory)
-            offer();directory=root/'drain-unconfirmed';value=run(directory,expected=1,fail_drain=True)
+            offer();directory=root/'drain-unconfirmed';value=run(directory,expected=1,fail_drain=True,stop_after_poll=False)
             assert value['phase']=='prepared' and value['high_water']==7,value
             assert not any(' start 7 ' in line for line in events(directory));stopped(directory)
             offer();directory=root/'start-failed';value=run(directory,fail_start=True,stop_after_poll=False,stop_after_rollback=True)

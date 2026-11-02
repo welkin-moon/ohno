@@ -7,9 +7,9 @@
 #include "../windows/update_runtime.hpp"
 #include "../windows/worker_process.hpp"
 namespace {
-bool fail_drain_on_start=false,fail_start=false,stop_after_poll=true,stop_after_rollback=false,saw_rollback=false;std::wstring fixture_root;unsigned crash=0,stop_at=0;HANDLE stop_event=nullptr;
+bool fail_drain=false,fail_drain_on_start=false,fail_start=false,stop_after_poll=true,stop_after_rollback=false,saw_rollback=false;std::wstring fixture_root;unsigned crash=0,stop_at=0;HANDLE stop_event=nullptr;
 void worker_point(unsigned p,DWORD pid){if(pid){std::ofstream out(std::filesystem::path(fixture_root+L"\\worker-events.log"),std::ios::app);out<<pid<<" constructor\n";}if(p==crash)ExitProcess(100+p);if(p==stop_at)SetEvent(stop_event);if(p==11&&fail_start){if(fail_drain_on_start)ohno::set_worker_test_hooks(worker_point,true);throw std::runtime_error("fixture start failure");}}
-void point(unsigned p){if(p==crash)ExitProcess(100+p);if(p==9)saw_rollback=true;if(p==stop_at||(p==14&&stop_after_poll)||(p==2&&saw_rollback&&stop_after_rollback))SetEvent(stop_event);}
+void point(unsigned p){if(p==crash)ExitProcess(100+p);if(p==4&&fail_drain)ohno::set_worker_test_hooks(worker_point,true);if(p==9)saw_rollback=true;if(p==stop_at||(p==14&&stop_after_poll)||(p==2&&saw_rollback&&stop_after_rollback))SetEvent(stop_event);}
 std::string text(const ohno_json::value& v,const char* name){return ohno::update_detail::text(v,name);}
 std::wstring wide(const std::string& s){int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),static_cast<int>(s.size()),nullptr,0);if(n<=0)throw std::runtime_error("path");std::wstring w(n,L'\0');MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),static_cast<int>(s.size()),w.data(),n);return w;}
 std::string file(const std::wstring& path){std::ifstream f(std::filesystem::path(path),std::ios::binary);if(!f)throw std::runtime_error("file");return {std::istreambuf_iterator<char>(f),{}};}
@@ -24,8 +24,12 @@ int main(){
         crash=static_cast<unsigned>(ohno::update_detail::integer(v,"crash",0,12));stop_at=static_cast<unsigned>(ohno::update_detail::integer(v,"stop_at",0,12));
         fail_start=v.at("fail_start").boolean;fail_drain_on_start=v.at("fail_drain_on_start").boolean;
         stop_after_poll=v.at("stop_after_poll").boolean;stop_after_rollback=v.at("stop_after_rollback").boolean;
-        ohno::set_worker_test_hooks(worker_point,v.at("fail_drain").boolean);
-        ohno::UpdateRuntimeOptions options;options.poll_ms=100;options.health_timeout_ms=400;options.restart_delay_ms=100;options.checkpoint=point;
+        // This fault targets the switch after durable prepare, not an unrelated
+        // baseline startup retry or the final normal cleanup.
+        fail_drain=v.at("fail_drain").boolean;ohno::set_worker_test_hooks(worker_point,false);
+        // Do not assume cold process startup on a hosted runner fits 400 ms.
+        // Keep this fixture bounded at 3 seconds (production is 90 seconds).
+        ohno::UpdateRuntimeOptions options;options.poll_ms=100;options.health_timeout_ms=3000;options.restart_delay_ms=100;options.checkpoint=point;
         ohno::run_update_runtime(root,key,stop_event,[&]{return ohno::UpdateConnection{wide(text(v,"server")),text(v,"certificate"),key,text(v,"device_id"),text(v,"device_key")};},options);
         SetEvent(stop_event);timer.join();CloseHandle(stop_event);std::cout<<"stopped\n";return 0;
     }catch(...){if(stop_event)SetEvent(stop_event);if(timer.joinable())timer.join();if(stop_event)CloseHandle(stop_event);std::cerr<<"runtime rejected\n";return 1;}

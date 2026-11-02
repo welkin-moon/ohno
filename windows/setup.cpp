@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlobj.h>
+#include <sddl.h>
 #include <shobjidl.h>
 #include <winhttp.h>
 #include <wincrypt.h>
@@ -16,6 +17,7 @@
 #include "setup_bundle.hpp"
 #include "setup_ui.hpp"
 #include "maintenance_http.hpp"
+#include "installed_payload.hpp"
 #pragma comment(lib,"advapi32.lib")
 #pragma comment(lib,"shell32.lib")
 #pragma comment(lib,"ole32.lib")
@@ -30,6 +32,12 @@ struct secret_wide {std::wstring value;~secret_wide(){if(!value.empty())SecureZe
 struct sc {SC_HANDLE h=nullptr;~sc(){if(h)CloseServiceHandle(h);}};
 struct reg {HKEY h=nullptr;~reg(){if(h)RegCloseKey(h);}};
 std::wstring directory(){PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,0,nullptr,&raw)))return {};std::wstring p=raw;CoTaskMemFree(raw);return p+L"\\OhnoPrototype";}
+bool create_program_directory(const std::wstring& path){
+    PSECURITY_DESCRIPTOR descriptor=nullptr;
+    if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)",SDDL_REVISION_1,&descriptor,nullptr))return false;
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes),descriptor,FALSE};
+    const bool ok=CreateDirectoryW(path.c_str(),&attributes)!=FALSE;LocalFree(descriptor);return ok;
+}
 bool valid_url(const wchar_t* url){for(auto p=url;*p;++p)if(*p<33||*p>126)return false;URL_COMPONENTSW c{};c.dwStructSize=sizeof(c);c.dwHostNameLength=DWORD(-1);c.dwUserNameLength=DWORD(-1);c.dwPasswordLength=DWORD(-1);c.dwUrlPathLength=DWORD(-1);c.dwExtraInfoLength=DWORD(-1);return WinHttpCrackUrl(url,0,0,&c)&&c.nScheme==INTERNET_SCHEME_HTTPS&&c.nPort!=0&&c.dwHostNameLength&&!c.dwUserNameLength&&!c.dwPasswordLength&&!c.dwExtraInfoLength&&c.dwUrlPathLength<=1;}
 // This changes machine-wide certificate trust. School administrators must
 // verify the teacher endpoint before distributing a personalized installer.
@@ -77,6 +85,15 @@ bool embedded_exe(const std::wstring& path,int resource_id){
     HGLOBAL data=LoadResource(nullptr,res);DWORD size=SizeofResource(nullptr,res);void* src=LockResource(data);if(!src||!size)return false;
     HANDLE f=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(f==INVALID_HANDLE_VALUE)return false;
     DWORD wrote=0;BOOL ok=WriteFile(f,src,size,&wrote,nullptr);CloseHandle(f);return ok&&wrote==size;
+}
+bool initial_payload(const std::wstring& root){
+    try {
+        HRSRC resource=FindResourceW(nullptr,MAKEINTRESOURCEW(107),RT_RCDATA);if(!resource)return false;
+        HGLOBAL data=LoadResource(nullptr,resource);DWORD size=SizeofResource(nullptr,resource);const char* bytes=static_cast<const char*>(LockResource(data));if(!bytes||!size)return false;
+        ohno::WindowsUpdateJournal storage(root);
+        const auto initial=ohno::stage_initial_payload(storage,std::string_view(bytes,size));
+        return storage.initialize(ohno::initial_update_journal(initial))==ohno::JournalWrite::Durable;
+    }catch(...){return false;}
 }
 bool make_shortcut(const std::wstring& exe,std::wstring& created){
     PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_PublicDesktop,0,nullptr,&raw)))return false;
@@ -178,14 +195,15 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
     std::string pem=embedded_pem?*embedded_pem:std::string{};
     if(certificate_path&&!certificate_pem_from_file(certificate_path,pem)){std::fwprintf(stderr,L"Cannot read teacher public certificate.\n");return 1;}
     if(!authorize(url,pem,false))return authorization_cancelled?2:1;
-    std::wstring dir=directory();if(dir.empty()||!CreateDirectoryW(dir.c_str(),nullptr)){std::fwprintf(stderr,L"Cannot create program directory (%lu)\n",GetLastError());return 1;}
+    std::wstring dir=directory();if(dir.empty()||!create_program_directory(dir)){std::fwprintf(stderr,L"Cannot create program directory (%lu)\n",GetLastError());return 1;}
     std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe",tun=dir+L"\\ohno-tun.exe",gpl=dir+L"\\sing-box-LICENSE.txt",wintun=dir+L"\\wintun-LICENSE.txt",shortcut;bool made_key=false;bool made_service=false;bool made_uninstaller=false;int result=1;
     const std::wstring maintenance=dir+L"\\ohno-maintenance.exe";
     do{
-        if(!CopyFileW(module_path().c_str(),maintenance.c_str(),TRUE)||!embedded_exe(exe,101)||!embedded_exe(helper,102)||!embedded_exe(tun,103)||!embedded_exe(gpl,105)||!embedded_exe(wintun,106)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
+        if(!CopyFileW(module_path().c_str(),maintenance.c_str(),TRUE)||!embedded_exe(exe,101)||!embedded_exe(helper,102)||!initial_payload(dir)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
         reg config;DWORD disposition=0;
         if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,nullptr,0,KEY_WRITE,nullptr,&config.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY){std::fwprintf(stderr,L"Cannot create configuration.\n");break;}
         made_key=true;
+        DWORD layout=1;if(RegSetValueExW(config.h,L"PayloadLayout",0,REG_DWORD,reinterpret_cast<const BYTE*>(&layout),sizeof(layout))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot record managed payload layout.\n");break;}
         if(RegSetValueExW(config.h,L"ServerUrl",0,REG_SZ,reinterpret_cast<const BYTE*>(url),static_cast<DWORD>((wcslen(url)+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot write configuration.\n");break;}
         if(!pem.empty()&&!write_config(config.h,L"TeacherCertificatePem",std::wstring(pem.begin(),pem.end()))){std::fwprintf(stderr,L"Cannot save public teacher certificate.\n");break;}
         if(release_key&&!release_key->empty()&&!write_config(config.h,L"ReleasePublicKey",std::wstring(release_key->begin(),release_key->end()))){std::fwprintf(stderr,L"Cannot save public release key.\n");break;}
@@ -200,10 +218,14 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         SC_ACTION actions[]={{SC_ACTION_RESTART,3000},{SC_ACTION_RESTART,10000},{SC_ACTION_NONE,0}};
         SERVICE_FAILURE_ACTIONSW recovery{};recovery.dwResetPeriod=3600;recovery.cActions=3;recovery.lpsaActions=actions;
         if(!ChangeServiceConfig2W(svc.h,SERVICE_CONFIG_FAILURE_ACTIONS,&recovery)){std::fwprintf(stderr,L"Cannot configure recovery (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
+        // Documented to take effect after system restart; same-boot process
+        // crashes still use the ordinary SCM recovery actions above.
+        SERVICE_FAILURE_ACTIONS_FLAG failure_flag{};failure_flag.fFailureActionsOnNonCrashFailures=TRUE;
+        if(!ChangeServiceConfig2W(svc.h,SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,&failure_flag)){std::fwprintf(stderr,L"Cannot configure reported-error recovery (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
         if(!StartServiceW(svc.h,0,nullptr)){std::fwprintf(stderr,L"Cannot start service (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
         std::wprintf(L"Prototype installed. Approve the device in the teacher UI.\n");result=0;
     }while(false);
-    if(result){if(made_uninstaller)RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);DeleteFileW(maintenance.c_str());if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());RemoveDirectoryW(dir.c_str());}
+    if(result){if(made_uninstaller)RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);DeleteFileW(maintenance.c_str());if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());ohno::remove_installed_payloads(dir);RemoveDirectoryW(dir.c_str());}
     return result;
 }
 int remove(bool administrator_recovery=false){
@@ -241,6 +263,7 @@ int remove(bool administrator_recovery=false){
     }
     const auto removed_entry=RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);
     if(removed_entry!=ERROR_SUCCESS&&removed_entry!=ERROR_FILE_NOT_FOUND)std::fwprintf(stderr,L"Could not remove uninstall registration; inspect manually.\n");
+    if(!ohno::remove_installed_payloads(dir))std::fwprintf(stderr,L"Some payload content was retained; inspect manually.\n");
     if(!RemoveDirectoryW(dir.c_str()))std::fwprintf(stderr,L"Could not remove program folder (%lu); inspect manually.\n",GetLastError());
     if(RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno")!=ERROR_SUCCESS)std::fwprintf(stderr,L"Could not remove registry settings; inspect manually.\n");
     return 0;
@@ -250,6 +273,7 @@ int wmain(int argc,wchar_t** argv){
     std::vector<wchar_t*> args;args.push_back(argv[0]);
     for(int i=1;i<argc;++i){if(std::wcscmp(argv[i],L"--password-stdin")==0){if(password_stdin)return 2;password_stdin=true;}else args.push_back(argv[i]);}
     argc=static_cast<int>(args.size());argv=args.data();
+#ifndef OHNO_PAYLOAD_MAINTENANCE
     if(argc==1 || (argc==2&&std::wcscmp(argv[1],L"--install-bundled")==0)){
         ohno::SchoolBootstrap config;
         const auto result=ohno::read_school_bundle(config);
@@ -273,6 +297,7 @@ int wmain(int argc,wchar_t** argv){
     }
     if(argc==3&&std::wcscmp(argv[1],L"--install")==0)return install(argv[2],nullptr);
     if(argc==5&&std::wcscmp(argv[1],L"--install")==0&&std::wcscmp(argv[3],L"--certificate")==0)return install(argv[2],argv[4]);
+#endif
     if(argc==2&&std::wcscmp(argv[1],L"--remove")==0){
         const int result=remove();
         if(!password_stdin&&result!=2)MessageBoxW(nullptr,result==0?(reboot_cleanup_pending?L"Ohno 已卸载。维护器自身文件将在重启后清理。":L"Ohno 已卸载。"):

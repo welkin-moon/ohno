@@ -7,6 +7,7 @@
 #include <vector>
 #include "update_payload.hpp"
 #include "update_verify.hpp"
+#include "trusted_directory.hpp"
 #pragma comment(lib,"bcrypt.lib")
 namespace {
 #ifdef OHNO_UPDATE_IO_TESTING
@@ -126,7 +127,12 @@ UpdateRevision stage_initial_payload(WindowsUpdateJournal& storage,std::string_v
     stage(storage,package,parsed,revision,{}, {},stop);return revision;
 }
 void verify_staged_payload(WindowsUpdateJournal& storage,const UpdateRevision& revision,const std::string& pinned_key,HANDLE stop){
-    canceled(stop);const auto folder=payload_directory(storage,revision);Directory parent(versions(storage)),pinned(folder);
+    verify_staged_payload(storage.directory_path(),revision,pinned_key,stop);
+}
+void verify_staged_payload(const std::wstring& root,const UpdateRevision& revision,const std::string& pinned_key,HANDLE stop){
+    transaction_detail::revision(revision);TrustedDirectory trusted(root);
+    canceled(stop);const auto version_root=root+L"\\versions";
+    const auto folder=version_root+L"\\"+std::to_wstring(revision.sequence)+L"-"+wide(revision.sha256);Directory parent(version_root),pinned(folder);
     Mapped package(folder+L"\\payload.ohno");require(digest(package.view(),stop)==revision.sha256);
     const auto parsed=parse_update_package(package.view());require(parsed.version==revision.version);
     Mapped record(folder+L"\\release.json",4096);
