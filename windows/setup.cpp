@@ -169,7 +169,7 @@ bool is_administrator(){
     if(!AllocateAndInitializeSid(&authority,2,SECURITY_BUILTIN_DOMAIN_RID,DOMAIN_ALIAS_RID_ADMINS,0,0,0,0,0,0,&group))return false;
     const bool ok=CheckTokenMembership(nullptr,group,&member)!=FALSE;FreeSid(group);return ok&&member;
 }
-int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr){
+int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr,const std::string* release_key=nullptr){
     if(!valid_url(url)){std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
     sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)};if(!manager.h){std::fwprintf(stderr,L"Administrator access required (%lu)\n",GetLastError());return 1;}
     sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){std::fwprintf(stderr,L"Service already exists.\n");return 1;}
@@ -188,6 +188,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         made_key=true;
         if(RegSetValueExW(config.h,L"ServerUrl",0,REG_SZ,reinterpret_cast<const BYTE*>(url),static_cast<DWORD>((wcslen(url)+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot write configuration.\n");break;}
         if(!pem.empty()&&!write_config(config.h,L"TeacherCertificatePem",std::wstring(pem.begin(),pem.end()))){std::fwprintf(stderr,L"Cannot save public teacher certificate.\n");break;}
+        if(release_key&&!release_key->empty()&&!write_config(config.h,L"ReleasePublicKey",std::wstring(release_key->begin(),release_key->end()))){std::fwprintf(stderr,L"Cannot save public release key.\n");break;}
         if(!register_uninstaller(dir,maintenance,made_uninstaller)){std::fwprintf(stderr,L"Cannot register uninstaller.\n");break;}
         if(!make_shortcut(helper,shortcut)){std::fwprintf(stderr,L"Cannot create request shortcut.\n");break;}
         if(!shortcut.empty()&&RegSetValueExW(config.h,L"Shortcut",0,REG_SZ,reinterpret_cast<const BYTE*>(shortcut.c_str()),static_cast<DWORD>((shortcut.size()+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot record request shortcut.\n");break;}
@@ -253,7 +254,7 @@ int wmain(int argc,wchar_t** argv){
         ohno::SchoolBootstrap config;
         const auto result=ohno::read_school_bundle(config);
         if(result==ohno::BootstrapResult::Ready){
-            const int code=install(config.server.c_str(),nullptr,&config.certificate_pem);
+            const int code=install(config.server.c_str(),nullptr,&config.certificate_pem,&config.release_public_key);
             if(argc==1&&!password_stdin&&code!=2)MessageBoxW(nullptr,
                 code==0?L"Ohno 已安装，服务已自动启动。请在教师端批准设备。":
                 L"Ohno 安装失败，请检查系统服务与程序目录，或联系学校 IT。",

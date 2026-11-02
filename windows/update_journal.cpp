@@ -120,6 +120,7 @@ struct WindowsUpdateJournal::Impl {
 };
 WindowsUpdateJournal::WindowsUpdateJournal(const std::wstring& directory):impl(std::make_unique<Impl>(directory)){}
 WindowsUpdateJournal::~WindowsUpdateJournal()=default;
+const std::wstring& WindowsUpdateJournal::directory_path() const{return impl->directory;}
 std::string WindowsUpdateJournal::read(){return impl->read();}
 JournalWrite WindowsUpdateJournal::replace(const std::string& document){
     impl->read(); // missing/corrupt state can never be silently reconstructed

@@ -67,6 +67,8 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_journal.cpp windows\update_journal.cpp /Fe:update-journal-test.exe
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_client.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-client-test.exe bcrypt.lib winhttp.lib crypt32.lib
+          if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_maintenance_client.cpp windows\maintenance_http.cpp /Fe:maintenance-client.exe winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_test.cpp windows\request_pipe.cpp src\policy.cpp /Fe:pipe-test.exe advapi32.lib
@@ -155,6 +157,9 @@ jobs:
       - name: Exercise native journal crash recovery in temporary NTFS directories
         shell: cmd
         run: python tests\windows_update_journal.py --client update-journal-test.exe
+      - name: Exercise native signed package pulling and interrupted staging
+        shell: cmd
+        run: python tests\windows_update_staging.py --client update-client-test.exe
       - name: Exercise native TLS and maintenance protocol adversaries
         shell: cmd
         run: python tests\windows_maintenance_transport.py --client maintenance-client.exe

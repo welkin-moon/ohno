@@ -17,7 +17,7 @@ BootstrapResult read_school_bundle(SchoolBootstrap& config) {
     if(!GetFileSizeEx(file,&size) || size.QuadPart<16) {
         CloseHandle(file);return BootstrapResult::Invalid;
     }
-    constexpr DWORD max_tail=16+1024+16384;
+    constexpr DWORD max_tail=20+1024+16384+130;
     DWORD wanted=static_cast<DWORD>(std::min<LONGLONG>(size.QuadPart,max_tail));
     LARGE_INTEGER start{};start.QuadPart=size.QuadPart-wanted;
     if(!SetFilePointerEx(file,start,nullptr,FILE_BEGIN)){
