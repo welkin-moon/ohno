@@ -346,17 +346,39 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply(self, status, data, content_type='text/plain; charset=utf-8', headers=()):
         body = data.encode('utf-8') if isinstance(data, str) else data
-        self.send_response(status)
-        self.send_header('Content-Type', content_type)
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
-        self.send_header('Referrer-Policy', 'no-referrer')
-        for key, value in headers:
-            self.send_header(key, value)
-        self.end_headers()
-        self.wfile.write(body)
+        binary = content_type == 'application/octet-stream'
+        # A single sendall(large_package) applies the socket timeout to the
+        # entire transfer. Bound each chunk instead, plus an aggregate deadline;
+        # slow receivers still cannot occupy a download slot indefinitely.
+        deadline = time.monotonic() + 300 if binary else None
+        try:
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header('Referrer-Policy', 'no-referrer')
+            for key, value in headers:
+                self.send_header(key, value)
+            if binary:
+                self.send_header('Connection', 'close')
+                self.close_connection = True
+            self.end_headers()
+            if binary:
+                view = memoryview(body)
+                for offset in range(0, len(view), 65536):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    self.connection.settimeout(min(self.server.request_timeout, remaining))
+                    self.wfile.write(view[offset:offset+65536])
+            else:
+                self.wfile.write(body)
+        except OSError:
+            # Headers or a body prefix may already be on the wire. Never append
+            # a second HTTP 503/JSON response into an incomplete binary package.
+            self.close_connection = True
 
     def json_reply(self, status, value):
         self.reply(status, json.dumps(value, ensure_ascii=False), 'application/json; charset=utf-8')
