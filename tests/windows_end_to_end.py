@@ -107,7 +107,7 @@ def main():
         release_public_key=prepared.release_catalog.public_key
         prepared.close()
         try:
-            server=subprocess.Popen([sys.executable,str(root/'teacher/server.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
+            server=subprocess.Popen([sys.executable,str(root/'tests/windows_e2e_teacher.py'),'--state',str(state),'--cert',str(cert),'--key',str(key),'--bind','127.0.0.1','--port','8443'])
             waitfor(lambda:call('GET','/health')[0]==200,15)
             # Exercise the same embedded school configuration used by a double-click,
             # without a message box on the headless CI runner.
@@ -212,6 +212,11 @@ def main():
                 print('Fixture package approved',version,len(package),body,flush=True)
                 return json.loads(body)
             publish('0.2.0')
+            # Exercise the actual registry loader and native pinned offer path
+            # independently of host scheduling, without selector/file mutation.
+            probe=subprocess.run([str(root/'installed-update-probe.exe')],timeout=30)
+            if probe.returncode:
+                update_diagnostics();raise RuntimeError('installed native offer probe failed')
             good=wait_update(lambda:journal() if journal()['phase']=='stable' and journal()['active']['sequence']==1 else None,180)
             assert good['active']['version']=='0.2.0' and good['high_water']==1
             assert device in read()['devices'] and read()['devices'][device]['bound_mac']==first_mac

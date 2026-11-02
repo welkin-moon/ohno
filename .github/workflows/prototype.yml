@@ -81,6 +81,8 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
           if errorlevel 1 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_update_probe.cpp windows\update_configuration.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:installed-update-probe.exe advapi32.lib bcrypt.lib winhttp.lib crypt32.lib
+          if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_maintenance_client.cpp windows\maintenance_http.cpp /Fe:maintenance-client.exe winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_test.cpp windows\request_pipe.cpp src\policy.cpp /Fe:pipe-test.exe advapi32.lib
