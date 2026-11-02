@@ -6,13 +6,27 @@
 #include "../src/policy.hpp"
 namespace {
 struct handle{HANDLE h=nullptr;~handle(){if(h&&h!=INVALID_HANDLE_VALUE)CloseHandle(h);}};
+struct local_memory{HLOCAL h=nullptr;~local_memory(){if(h)LocalFree(h);}};
+PSECURITY_DESCRIPTOR pipe_security(){
+    handle token;if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token.h))return nullptr;
+    alignas(TOKEN_USER) BYTE storage[sizeof(TOKEN_USER)+SECURITY_MAX_SID_SIZE]{};
+    DWORD size=0;if(!GetTokenInformation(token.h,TokenUser,storage,sizeof(storage),&size))return nullptr;
+    LPWSTR sid=nullptr;
+    if(!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(storage)->User.Sid,&sid))return nullptr;
+    local_memory sid_memory{sid};
+    // Explicit creator identity, not the token's possibly different default
+    // owner group. Production worker is LocalSystem; user fixtures stay users.
+    const auto sddl=std::wstring(L"O:")+sid+L"D:P(A;;GA;;;SY)(A;;0x12019B;;;AU)";
+    PSECURITY_DESCRIPTOR descriptor=nullptr;
+    if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(),SDDL_REVISION_1,&descriptor,nullptr))return nullptr;
+    return descriptor;
+}
 }
 RequestPipe::RequestPipe(HANDLE stop,std::function<std::string(const std::string&)> callback):stop_(stop),callback_(std::move(callback)),worker_(&RequestPipe::serve,this){}
 RequestPipe::~RequestPipe(){if(worker_.joinable())worker_.join();}
 void RequestPipe::serve(){
-    PSECURITY_DESCRIPTOR sd=nullptr;
     // Authenticated local users can read/write their request but cannot create server instances.
-    if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x12019B;;;AU)",SDDL_REVISION_1,&sd,nullptr))return;
+    PSECURITY_DESCRIPTOR sd=pipe_security();if(!sd)return;
     SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};
     while(WaitForSingleObject(stop_,0)==WAIT_TIMEOUT){
         available_.store(false);

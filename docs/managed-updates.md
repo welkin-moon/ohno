@@ -259,3 +259,28 @@ control-plane separation still apply. CI adds 24 real WinHTTP cases across all
 four routes: valid 200/201 and large policy, wrong pin, expired/hostname-mismatched
 certificate, redirect and oversize. These use only loopback listeners and short-
 lived fixture secrets, no installation or trust-store changes.
+
+### Local request/PIN pipe identity
+
+The request window now queries the owner on the **connected pipe handle** before
+writing any website/PIN bytes, and accepts only a LocalSystem-owned object.
+The service explicitly assigns the pipe's creator-user SID as owner (SYSTEM in
+the production worker), keeping the existing local authenticated-user DACL and
+no-create-instance rights unchanged. A normal user squatting the public name
+therefore cannot collect the classroom PIN; an OS administrator/SYSTEM remains
+outside this boundary and retains standard recovery/removal authority.
+
+The client requests READ_CONTROL plus individual data rights, not GENERIC_WRITE,
+and uses identification-only SQOS so a squatting server cannot impersonate it for
+access. See Microsoft's [named-pipe access rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+and [GetSecurityInfo handle/owner requirements](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo).
+No persistent account, ACL, privilege or trust-store setting is changed by this
+client check; the server descriptor applies only to its newly created IPC object.
+
+A disposable user-owned fake pipe must receive zero PIN bytes and return the
+explicit untrusted result; input buffers are erased on refusal and absence.
+The E2E driver shares the GUI's exact client implementation for real SYSTEM-service
+website requests and PIN unlock, with retries only before a handle could open.
+No unknown response/possibly executed operation is replayed. This does not make
+the old synchronous GUI fully asynchronous; broader UI responsiveness remains a
+separate usability qualification.
