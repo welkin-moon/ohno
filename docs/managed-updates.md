@@ -281,9 +281,9 @@ A disposable user-owned fake pipe must receive zero PIN bytes and return the
 explicit untrusted result; input buffers are erased on refusal and absence.
 The E2E driver shares the GUI's exact client implementation for real SYSTEM-service
 website requests and PIN unlock, with retries only before a handle could open.
-No unknown response/possibly executed operation is replayed. This does not make
-the old synchronous GUI fully asynchronous; broader UI responsiveness remains a
-separate usability qualification.
+No unknown response/possibly executed operation is replayed. The request GUI now
+uses the cancellable worker path described below; a separate standard-user
+desktop/OEM session still requires qualification.
 
 The real-service E2E pipe driver drops privileges and disables its administrator
 SID in a restricted token, verifying administrator membership is false before
@@ -308,3 +308,32 @@ adds its own short-lived fixture root + old marker immediately before removal to
 exercise legacy cleanup; a second new install again must create no root/marker.
 Those compatibility mutations occur only in the disposable runner, not on any
 user/teacher/classroom machine.
+
+### Cancellable local request window
+
+The request GUI no longer performs pipe I/O on its message thread. It allows one
+operation at a time, disables both submit paths while pending (including repeated
+commands), clears the PIN field immediately, and displays results inline rather
+than opening late modal dialogs. Cancel/Escape and Close remain responsive.
+Workers own only their request/cancel state, never an HWND or UI-state pointer;
+window destruction cannot deliver a stale completion into a reopened window.
+
+The production client still checks SYSTEM ownership on the connected handle
+before writing. Read, write and acknowledgement use overlapped I/O with a shared
+25-second waiting budget and cancellation event. Cancellation requests are
+followed by completion draining before OVERLAPPED/buffers are freed; abnormal
+kernel completion delays must not be disguised as a guaranteed cancellation
+bound. This work runs outside the message thread, and closing this GUI does not
+stop the service or revoke an already sent teacher action. Cancel/timeout messages
+explicitly describe the possible unknown outcome, with no automatic replay.
+See [overlapped pipe I/O](https://learn.microsoft.com/en-us/windows/win32/ipc/synchronous-and-overlapped-input-and-output)
+and [CancelIoEx lifetime requirements](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex).
+
+CI tests pending read/write cancellation and deadlines on disposable user-owned
+pipes, separately from the public client's mandatory SYSTEM-owner refusal test.
+A fixture links the actual window code to a separate deterministic sender, testing
+invalid PIN, repeated clicks, Cancel, timeout, close while pending and reopening.
+It is not packaged with the product and introduces no production test override.
+The actual GUI is also tested with an absent service; authenticated installed
+service/PIN exchange remains covered by the existing restricted-token E2E suite.
+None of these tests is a claim of physical Win10/OEM desktop qualification.

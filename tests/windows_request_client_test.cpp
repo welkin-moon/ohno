@@ -41,5 +41,8 @@ int main(){
     std::string missing="U:2468";
     assert(send_teacher_request(missing)=="notready");
     assert(missing.find_first_not_of('\0')==std::string::npos);
+    HANDLE cancel=CreateEventW(nullptr,TRUE,TRUE,nullptr);assert(cancel);
+    std::string cancelled="U:2468";assert(send_teacher_request(cancelled,cancel)=="cancelled");
+    assert(cancelled.find_first_not_of('\0')==std::string::npos);CloseHandle(cancel);
     std::puts("User-owned pipe received zero raw PIN bytes; refusal/absence buffers wiped");
 }
