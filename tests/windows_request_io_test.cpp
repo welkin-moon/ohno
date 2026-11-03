@@ -53,5 +53,18 @@ int main(){
         if(!timeout)SetEvent(cancel.value);
         assert(result.get()==(timeout?outcome::timeout:outcome::cancelled));within(start);
     }
-    std::puts("Overlapped request: reply, read/write cancellation, timeout, pre-cancel zero bytes and buffer drain passed");
+    // Reply completion and cancellation can win in either order. Neither
+    // result permits automatic replay; the exchange must always drain/wipe.
+    for(int i=0;i<24;++i){
+        pair pipe;handle cancel{CreateEventW(nullptr,TRUE,FALSE,nullptr)};assert(cancel.value);
+        std::string text="U:2468";
+        auto result=std::async(std::launch::async,[&]{return exchange(pipe.client.value,text,cancel.value,2000);});
+        char raw[64]{};DWORD count=0;assert(ReadFile(pipe.server.value,raw,sizeof(raw),&count,nullptr)&&count==6);
+        assert(WriteFile(pipe.server.value,"accepted",8,&count,nullptr)&&count==8);
+        if(i%2)Sleep(1);
+        SetEvent(cancel.value);const auto outcome=result.get();
+        assert(outcome=="accepted"||outcome=="cancelled");erased(text);
+        DWORD available=0;assert(PeekNamedPipe(pipe.server.value,nullptr,0,nullptr,&available,nullptr)&&available<=1);
+    }
+    std::puts("Overlapped request: reply, read/write cancellation, timeout, pre-cancel zero bytes, 24 reply/cancel races and buffer drain passed");
 }

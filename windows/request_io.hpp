@@ -23,7 +23,7 @@ inline outcome transfer(HANDLE pipe,HANDLE event,HANDLE cancel,ULONGLONG deadlin
     if(now>=deadline)return outcome::timeout;
     ResetEvent(event);OVERLAPPED operation{};operation.hEvent=event;
     const BOOL immediate=write?WriteFile(pipe,buffer,size,&count,&operation):ReadFile(pipe,buffer,size,&count,&operation);
-    if(immediate)return outcome::complete;
+    if(immediate)return GetOverlappedResult(pipe,&operation,&count,FALSE)?outcome::complete:outcome::unavailable;
     if(GetLastError()!=ERROR_IO_PENDING)return outcome::unavailable;
     HANDLE waits[2]{cancel,event};const auto issued=GetTickCount64();
     const DWORD remaining=issued<deadline?static_cast<DWORD>(deadline-issued):0;

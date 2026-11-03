@@ -86,8 +86,9 @@ def window_for(pid):
 
 
 def send(window,message,wp=0,lp=0):
-    result=c.c_size_t()
-    assert ui.SendMessageTimeoutW(window,message,wp,lp,2,1000,c.byref(result)), 'UI thread stopped responding'
+    result=c.c_size_t();c.set_last_error(0)
+    ok=ui.SendMessageTimeoutW(window,message,wp,lp,2,1000,c.byref(result))
+    assert ok, ('message failed or UI stopped responding',hex(message),hex(window),c.get_last_error(),result.value)
     return result.value
 
 
@@ -107,6 +108,7 @@ def text(window,id):
     return buffer.value
 
 
+def length(window,id):return send(control(window,id),0x000e)
 def command(window,id):send(window,0x0111,id)
 def enabled(window,id):return bool(ui.IsWindowEnabled(control(window,id)))
 
@@ -119,7 +121,8 @@ def launch(binary,fixture=False):
             prefix='Local\\OhnoRequestGuiTest-'+str(process.pid)
             handles=[kernel.CreateSemaphoreW(None,0,100,prefix+'-calls'),
                      kernel.CreateEventW(None,True,False,prefix+'-finish'),
-                     kernel.CreateEventW(None,True,False,prefix+'-timeout')]
+                     kernel.CreateEventW(None,True,False,prefix+'-timeout'),
+                     kernel.CreateEventW(None,True,False,prefix+'-real-io')]
             assert all(handles)
         window=waitfor(lambda:window_for(process.pid))
         yield process,window,handles
@@ -142,7 +145,7 @@ def pending(window,calls,id=102):
     assert kernel.WaitForSingleObject(calls,3000)==0
     assert not any(enabled(window,id) for id in (101,102,103,104))
     assert enabled(window,2)
-    assert text(window,103)==''
+    assert length(window,103)==0
     for _ in range(5):command(window,102);command(window,104)
     assert kernel.WaitForSingleObject(calls,50)==258, 'duplicate request started'
     send(window,0) # responsive WM_NULL while its worker is waiting
@@ -150,10 +153,12 @@ def pending(window,calls,id=102):
 
 def main():
     with launch('request-ui-fixture.exe',True) as (process,window,handles):
-        calls,finish,timeout=handles
+        calls,finish,timeout,real_io=handles
         capture(window,'idle')
-        set_text(window,103,'not-a-PIN');command(window,104)
-        assert text(window,103)=='' and '数字' in text(window,105)
+        set_text(window,103,'not-a-PIN');assert length(window,103)==9
+        command(window,104)
+        capture(window,'invalid-pin-cleared')
+        assert length(window,103)==0 and '数字' in text(window,105)
         assert kernel.WaitForSingleObject(calls,0)==258
         pending(window,calls)
         capture(window,'pending')
@@ -171,18 +176,19 @@ def main():
         waitfor(lambda:'等待超时' in text(window,105))
         assert kernel.ResetEvent(timeout)
         assert kernel.WaitForSingleObject(calls,0)==258, 'timeout replayed request'
+        assert kernel.SetEvent(real_io)
         pending(window,calls,104)
         start=time.monotonic();assert ui.PostMessageW(window,0x0010,0,0)
         assert process.wait(timeout=3)==0 and time.monotonic()-start<3
     # Reopen after an interrupted request: no stale completion, PIN or request.
     with launch('request-ui-fixture.exe',True) as (_,window,handles):
-        assert text(window,103)=='' and text(window,105)=='' and enabled(window,102)
+        assert length(window,103)==0 and text(window,105)=='' and enabled(window,102)
         assert kernel.WaitForSingleObject(handles[0],100)==258
     with launch('ohno-request.exe') as (_,window,_):
         set_text(window,103,'2468');command(window,104)
         waitfor(lambda:enabled(window,102))
         waitfor(lambda:'尚未发送' in text(window,105))
-        assert text(window,103)==''
+        assert length(window,103)==0
     print('Real GUI: invalid PIN, single-flight repeats, Cancel, timeout, Close, reopen and absent-service paths passed')
 
 

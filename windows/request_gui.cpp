@@ -66,7 +66,7 @@ LRESULT CALLBACK handler(HWND window,UINT msg,WPARAM wp,LPARAM lp){
     auto* ui=reinterpret_cast<Ui*>(GetWindowLongPtrW(window,GWLP_USERDATA));
     if(msg==WM_NCCREATE){
         ui=static_cast<Ui*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-        SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(ui));return TRUE;
+        SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(ui));return DefWindowProcW(window,msg,wp,lp);
     }
     if(msg==WM_CREATE&&ui){
         auto control=[&](const wchar_t* kind,const wchar_t* text,DWORD style,int x,int y,int w,int h,int id,DWORD ex=0){
@@ -77,7 +77,7 @@ LRESULT CALLBACK handler(HWND window,UINT msg,WPARAM wp,LPARAM lp){
         ui->site=control(L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,18,44,350,27,site_id,WS_EX_CLIENTEDGE);
         SendMessageW(ui->site,EM_SETLIMITTEXT,253,0);
         ui->request=control(L"BUTTON",L"向教师申请",WS_TABSTOP,18,82,130,30,request_id);
-        control(L"STATIC",L"教师解锁 PIN（4–8 位数字，临时解除 1 小时）：",0,18,128,370,24,0);
+        control(L"STATIC",L"教师解锁 PIN（4 到 8 位数字，临时解除 1 小时）：",0,18,128,370,24,0);
         ui->pin=control(L"EDIT",L"",WS_TABSTOP|ES_PASSWORD|ES_AUTOHSCROLL,18,157,350,27,pin_id,WS_EX_CLIENTEDGE);
         SendMessageW(ui->pin,EM_SETLIMITTEXT,128,0);
         ui->unlock=control(L"BUTTON",L"教师解锁",WS_TABSTOP,18,195,130,30,unlock_id);
@@ -107,7 +107,7 @@ LRESULT CALLBACK handler(HWND window,UINT msg,WPARAM wp,LPARAM lp){
             std::string payload;payload.reserve(10);payload="U:";bool valid=len>=4&&len<=8;
             for(int i=0;i<len&&valid;++i){if(text[i]<L'0'||text[i]>L'9')valid=false;else payload+=static_cast<char>(text[i]);}
             SecureZeroMemory(text,sizeof(text));
-            if(!valid){SecureZeroMemory(payload.data(),payload.size());SetWindowTextW(ui->status,L"请输入 4–8 位数字 PIN。");return 0;}
+            if(!valid){SecureZeroMemory(payload.data(),payload.size());SetWindowTextW(ui->status,L"请输入 4 到 8 位数字 PIN。");return 0;}
             begin(*ui,payload,true);return 0;
         }
     }
