@@ -1,44 +1,128 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <atomic>
+#include <memory>
 #include <string>
+#include <stdexcept>
+#include <thread>
 #include "request_client.hpp"
 #include "../src/policy.hpp"
 namespace {
-HWND site_edit=nullptr,pin_edit=nullptr;
-std::string utf8(const std::wstring& text){
- if(text.empty())return {};int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),nullptr,0,nullptr,nullptr);
- if(n<=0)return {};std::string s(static_cast<std::size_t>(n),'\0');if(!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),s.data(),n,nullptr,nullptr))return {};return s;
+constexpr int site_id=101,request_id=102,pin_id=103,unlock_id=104,status_id=105;
+struct Operation {
+    HANDLE cancel=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    std::string request,result;
+    std::atomic<bool> done{false};
+    bool unlock=false;
+    ~Operation(){if(!request.empty())SecureZeroMemory(request.data(),request.size());if(cancel)CloseHandle(cancel);}
+};
+struct Ui {
+    HWND site=nullptr,pin=nullptr,status=nullptr,request=nullptr,unlock=nullptr,cancel=nullptr;
+    std::shared_ptr<Operation> pending;
+};
+struct wipe {std::string& value;~wipe(){if(!value.empty())SecureZeroMemory(value.data(),value.size());}};
+void busy(Ui& ui,bool active){
+    for(HWND control:{ui.site,ui.pin,ui.request,ui.unlock})EnableWindow(control,!active);
+    EnableWindow(ui.cancel,active);
+}
+void cancel(Ui& ui){
+    SetWindowTextW(ui.pin,L"");
+    if(ui.pending)SetEvent(ui.pending->cancel);
+}
+void begin(Ui& ui,std::string& payload,bool unlock){
+    wipe secret{payload};
+    if(ui.pending)return; // also reject duplicate synthetic button commands
+    try {
+        auto operation=std::make_shared<Operation>();
+        if(!operation->cancel)throw std::runtime_error("cannot create cancel event");
+        operation->request.assign(payload);operation->unlock=unlock;
+        // A detached worker owns only its operation, never a window or Ui.
+        // Closing the window can release Ui immediately; no stale HWND, queued
+        // completion pointer or freed OVERLAPPED buffer is touched by the worker.
+        std::thread([operation]{
+            try{operation->result=send_teacher_request(operation->request,operation->cancel);}
+            catch(...){operation->result="unavailable";}
+            if(!operation->request.empty())SecureZeroMemory(operation->request.data(),operation->request.size());
+            operation->done.store(true,std::memory_order_release);
+        }).detach();
+        ui.pending=std::move(operation);busy(ui,true);
+        SetWindowTextW(ui.status,L"正在等待教师端…可以取消等待或直接关闭窗口。");
+    }catch(...){SetWindowTextW(ui.status,L"无法开始请求，请检查本机服务。");}
+}
+void complete(Ui& ui){
+    if(!ui.pending||!ui.pending->done.load(std::memory_order_acquire))return;
+    const auto operation=std::move(ui.pending);busy(ui,false);
+    const auto& result=operation->result;
+    const wchar_t* text=L"未能确认结果，请查看教师端；不会自动重发。";
+    if(result=="accepted")text=operation->unlock?L"PIN 验证通过，限制将在同步后暂停一小时。":L"申请已提交至教师端。";
+    else if(result=="denied")text=L"验证失败、设备未批准或尝试次数过多。";
+    else if(result=="notready")text=L"本机服务未就绪，请稍后再试。此请求尚未发送。";
+    else if(result=="untrusted")text=L"本地服务身份不符，未发送请求或 PIN。请联系管理员。";
+    else if(result=="cancelled")text=L"已取消等待；请求可能已执行，请查看教师端，不会自动重发。";
+    else if(result=="timeout")text=L"等待超时；请求可能已执行，请查看教师端，不会自动重发。";
+    SetWindowTextW(ui.status,text);
 }
 LRESULT CALLBACK handler(HWND window,UINT msg,WPARAM wp,LPARAM lp){
- if(msg==WM_CREATE){
-  CreateWindowW(L"STATIC",L"输入网站域名（例如 game.example）：",WS_CHILD|WS_VISIBLE,18,15,370,24,window,nullptr,nullptr,nullptr);
-  site_edit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,18,44,350,27,window,reinterpret_cast<HMENU>(1),nullptr,nullptr);
-  CreateWindowW(L"BUTTON",L"向教师申请",WS_CHILD|WS_VISIBLE|WS_TABSTOP,18,82,130,30,window,reinterpret_cast<HMENU>(2),nullptr,nullptr);
-  CreateWindowW(L"STATIC",L"教师解锁 PIN（4–8 位数字，临时解除 1 小时）：",WS_CHILD|WS_VISIBLE,18,128,370,24,window,nullptr,nullptr,nullptr);
-  pin_edit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_PASSWORD|ES_AUTOHSCROLL,18,157,350,27,window,reinterpret_cast<HMENU>(3),nullptr,nullptr);
-  CreateWindowW(L"BUTTON",L"教师解锁",WS_CHILD|WS_VISIBLE|WS_TABSTOP,18,195,130,30,window,reinterpret_cast<HMENU>(4),nullptr,nullptr);
-  CreateWindowW(L"STATIC",L"PIN 仅用于现场临时解锁；后台管理页只在教师机本地开放。",WS_CHILD|WS_VISIBLE,18,235,375,42,window,nullptr,nullptr,nullptr);return 0;
- }
- if(msg==WM_COMMAND&&LOWORD(wp)==2){
-  wchar_t text[254]{};int len=GetWindowTextW(site_edit,text,254);std::string host;
-  for(int i=0;i<len;++i){wchar_t c=text[i];if(c>=L'A'&&c<=L'Z')c+=L'a'-L'A';if(c>127){host.clear();break;}host+=static_cast<char>(c);}
-  if(!ohno::valid_hostname(host)){MessageBoxW(window,L"请输入域名，不要输入 https:// 或路径。",L"ohno",MB_OK|MB_ICONWARNING);return 0;}
-  std::string payload="W:"+host;auto result=send_teacher_request(payload);
-  MessageBoxW(window,result=="accepted"?L"申请已提交至教师端。":L"无法提交。请检查服务、设备审批和网络。",L"ohno",MB_OK|(result=="accepted"?MB_ICONINFORMATION:MB_ICONERROR));return 0;
- }
- if(msg==WM_COMMAND&&LOWORD(wp)==4){
-  wchar_t text[129]{};int len=GetWindowTextW(pin_edit,text,129);SetWindowTextW(pin_edit,L"");
-  std::wstring pin(text,static_cast<std::size_t>(len));SecureZeroMemory(text,sizeof(text));std::string encoded=utf8(pin);SecureZeroMemory(pin.data(),pin.size()*sizeof(wchar_t));
-  if(encoded.size()<4||encoded.size()>8||encoded.find_first_not_of("0123456789")!=std::string::npos){SecureZeroMemory(encoded.data(),encoded.size());MessageBoxW(window,L"请输入 4–8 位数字 PIN。",L"ohno",MB_OK|MB_ICONWARNING);return 0;}
-  std::string payload="U:"+encoded;SecureZeroMemory(encoded.data(),encoded.size());auto result=send_teacher_request(payload);
-  MessageBoxW(window,result=="accepted"?L"PIN 验证通过，本机限制将在同步后暂停一小时。":result=="denied"?L"验证失败或尝试次数过多。":L"无法联系教师端。",L"ohno",MB_OK|(result=="accepted"?MB_ICONINFORMATION:MB_ICONERROR));return 0;
- }
- if(msg==WM_DESTROY){PostQuitMessage(0);return 0;}return DefWindowProcW(window,msg,wp,lp);
+    auto* ui=reinterpret_cast<Ui*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+    if(msg==WM_NCCREATE){
+        ui=static_cast<Ui*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(ui));return DefWindowProcW(window,msg,wp,lp);
+    }
+    if(msg==WM_CREATE&&ui){
+        auto control=[&](const wchar_t* kind,const wchar_t* text,DWORD style,int x,int y,int w,int h,int id,DWORD ex=0){
+            return CreateWindowExW(ex,kind,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),nullptr,nullptr);
+        };
+        control(L"STATIC",L"输入网站域名（例如 game.example）：",0,18,15,370,24,0);
+        ui->site=control(L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,18,44,350,27,site_id,WS_EX_CLIENTEDGE);
+        SendMessageW(ui->site,EM_SETLIMITTEXT,253,0);
+        ui->request=control(L"BUTTON",L"向教师申请",WS_TABSTOP,18,82,130,30,request_id);
+        control(L"STATIC",L"教师解锁 PIN（4 到 8 位数字，临时解除 1 小时）：",0,18,128,370,24,0);
+        ui->pin=control(L"EDIT",L"",WS_TABSTOP|ES_PASSWORD|ES_AUTOHSCROLL,18,157,350,27,pin_id,WS_EX_CLIENTEDGE);
+        SendMessageW(ui->pin,EM_SETLIMITTEXT,128,0);
+        ui->unlock=control(L"BUTTON",L"教师解锁",WS_TABSTOP,18,195,130,30,unlock_id);
+        ui->cancel=control(L"BUTTON",L"取消等待",WS_TABSTOP,165,195,130,30,IDCANCEL);
+        ui->status=control(L"STATIC",L"",0,18,235,370,58,status_id);
+        control(L"STATIC",L"PIN 仅用于现场临时解锁；后台管理页只在教师机本地开放。",0,18,301,375,42,0);
+        if(!ui->site||!ui->pin||!ui->request||!ui->unlock||!ui->cancel||!ui->status||!SetTimer(window,1,50,nullptr))return -1;
+        busy(*ui,false);SetFocus(ui->site);return 0;
+    }
+    if(msg==WM_TIMER&&ui){complete(*ui);return 0;}
+    if(msg==WM_COMMAND&&ui){
+        const int id=LOWORD(wp);
+        if(id==IDCANCEL){
+            if(ui->pending){cancel(*ui);EnableWindow(ui->cancel,FALSE);SetWindowTextW(ui->status,L"正在取消等待；已发送的请求不能靠关闭窗口撤回。");}
+            else SendMessageW(window,WM_CLOSE,0,0);
+            return 0;
+        }
+        if(ui->pending)return 0;
+        if(id==request_id){
+            wchar_t text[254]{};const int len=GetWindowTextW(ui->site,text,254);std::string host;
+            for(int i=0;i<len;++i){wchar_t c=text[i];if(c>=L'A'&&c<=L'Z')c+=L'a'-L'A';if(c>127){host.clear();break;}host+=static_cast<char>(c);}
+            if(!ohno::valid_hostname(host)){SetWindowTextW(ui->status,L"请输入域名，不要输入 https:// 或路径。");return 0;}
+            std::string payload="W:"+host;begin(*ui,payload,false);return 0;
+        }
+        if(id==unlock_id){
+            wchar_t text[129]{};const int len=GetWindowTextW(ui->pin,text,129);SetWindowTextW(ui->pin,L"");
+            std::string payload;payload.reserve(10);payload="U:";bool valid=len>=4&&len<=8;
+            for(int i=0;i<len&&valid;++i){if(text[i]<L'0'||text[i]>L'9')valid=false;else payload+=static_cast<char>(text[i]);}
+            SecureZeroMemory(text,sizeof(text));
+            if(!valid){SecureZeroMemory(payload.data(),payload.size());SetWindowTextW(ui->status,L"请输入 4 到 8 位数字 PIN。");return 0;}
+            begin(*ui,payload,true);return 0;
+        }
+    }
+    if(msg==WM_CLOSE){if(ui)cancel(*ui);DestroyWindow(window);return 0;}
+    if(msg==WM_DESTROY){if(ui){cancel(*ui);ui->pending.reset();}KillTimer(window,1);PostQuitMessage(0);return 0;}
+    return DefWindowProcW(window,msg,wp,lp);
 }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show){
- WNDCLASSW wc{};wc.lpfnWndProc=handler;wc.hInstance=instance;wc.lpszClassName=L"OhnoRequestWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
- if(!RegisterClassW(&wc))return 1;
- HWND window=CreateWindowW(wc.lpszClassName,L"ohno 申请与临时解锁",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,410,325,nullptr,nullptr,instance,nullptr);
- if(!window)return 1;ShowWindow(window,show);UpdateWindow(window);MSG msg{};while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}return 0;
+    Ui ui;WNDCLASSW wc{};wc.lpfnWndProc=handler;wc.hInstance=instance;wc.lpszClassName=L"OhnoRequestWindow";
+    wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
+    if(!RegisterClassW(&wc))return 1;
+    HWND window=CreateWindowW(wc.lpszClassName,L"ohno 申请与临时解锁",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
+        CW_USEDEFAULT,CW_USEDEFAULT,410,390,nullptr,nullptr,instance,&ui);
+    if(!window)return 1;ShowWindow(window,show);UpdateWindow(window);MSG msg{};
+    while(GetMessageW(&msg,nullptr,0,0)>0){if(!IsDialogMessageW(window,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
+    return 0;
 }

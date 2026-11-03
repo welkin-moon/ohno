@@ -122,6 +122,18 @@ jobs:
           request-client-test.exe
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_request_io_test.cpp /Fe:request-io-test.exe
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          request-io-test.exe
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp tests\windows_request_gui_stub.cpp src\policy.cpp /Fe:request-ui-fixture.exe user32.lib /link /SUBSYSTEM:WINDOWS
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          python tests\windows_request_gui_test.py
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_pipe_client.cpp windows\request_client.cpp /Fe:pipe-client.exe advapi32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
@@ -226,6 +238,13 @@ jobs:
           monitor-test.exe %HASH%
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
+      - name: Upload request window evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohno-request-window-evidence
+          path: request-ui-evidence/*.bmp
+          if-no-files-found: ignore
       - name: Upload client prototype
         uses: actions/upload-artifact@v4
         with:
