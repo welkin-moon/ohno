@@ -585,8 +585,20 @@ func TestWindowsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixStr := string(fixRaw)
-	if !strings.Contains(fixStr, " start 2 1.0.2-nohealth-open") || !strings.Contains(fixStr, " stop 2 1.0.2-nohealth-open") {
+	if !strings.Contains(fixStr, " start 2 1.0.2-nohealth-open") || !strings.Contains(fixStr, " stop 1.0.2-nohealth-open") {
 		t.Fatalf("missing start/stop events: %s", fixStr)
+	}
+	var silences []int
+	for _, line := range strings.Split(strings.TrimSpace(fixStr), "\n") {
+		if strings.Contains(line, " silent-ms ") {
+			parts := strings.Fields(line)
+			if ms, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+				silences = append(silences, ms)
+			}
+		}
+	}
+	if len(silences) != 1 || silences[0] < 88000 || silences[0] > 105000 {
+		t.Fatalf("unexpected 90s health timeout: %v", silences)
 	}
 	_ = os.Remove(fixLog)
 	requestWindow(reqExeFor(rolledJ.LastGood))
