@@ -51,5 +51,53 @@ int main() {
     ohno::parse_client_policy(oversized);
     oversized.fields["web_domains"].items.push_back(parse("\"extra.example\""));
     rejects(oversized);
+
+    // Dual-mode (whitelist) and executable feature rule validation.
+    const std::string dual_json = R"({
+        "revision": 2,
+        "web_mode": "whitelist",
+        "web_domains": ["game.example"],
+        "allow_web_domains": ["edu.cn", "wikipedia.org"],
+        "program_mode": "whitelist",
+        "program_hashes": [],
+        "program_names": ["game.exe"],
+        "program_features": ["orig:plantsvszombies.exe", "title:植物大战僵尸"],
+        "allow_program_hashes": [")" + hash + R"("],
+        "allow_program_names": ["msedge.exe"],
+        "allow_program_features": ["signer:microsoft corporation"],
+        "block_local_files": true,
+        "grants": [{"kind":"website","object":"docs.python.org","expires":200}]
+    })";
+    auto dual = ohno::parse_client_policy(parse(dual_json));
+    assert(dual.web_mode == ohno::PolicyMode::Whitelist);
+    assert(dual.program_mode == ohno::PolicyMode::Whitelist);
+    auto dual_active = ohno::effective_policy(dual, 100, true);
+    assert(dual_active.web_mode == ohno::PolicyMode::Whitelist);
+    assert(dual_active.domains.size() == 2 && dual_active.domains[0] == "*" && dual_active.domains[1] == "file://*");
+    assert(dual_active.tun_domains.size() == 2 && dual_active.tun_domains[0] == "edu.cn");
+    assert(dual_active.allowed_sites.size() == 3 && dual_active.allowed_sites[2] == ".docs.python.org");
+    auto rules = dual_active.process_rules();
+    assert(rules.mode == ohno::PolicyMode::Whitelist);
+    assert(rules.allow_features.size() == 1 && rules.allow_features[0] == "signer:microsoft corporation");
+
+    // Pause overrides whitelist web blocking.
+    dual.grants.push_back({"pause", "*", 200});
+    auto dual_paused = ohno::effective_policy(dual, 100, true);
+    assert(dual_paused.paused && dual_paused.web_mode == ohno::PolicyMode::Blacklist);
+    assert(dual_paused.domains.empty() && dual_paused.tun_domains.empty());
+
+    // Invalid modes and feature prefixes are rejected.
+    for (const auto& pair : std::vector<std::pair<std::string, std::string>>{
+            {"web_mode", "\"invalid\""},
+            {"program_mode", "\"other\""},
+            {"program_features", "[\"badprefix:foo\"]"},
+            {"allow_program_features", "[\"orig:   \"]"},
+            {"allow_web_domains", "[\"bad domain\"]"},
+            {"allow_program_names", "[\"notexe.txt\"]"}}) {
+        auto invalid = parse(dual_json);
+        invalid.fields[pair.first] = parse(pair.second);
+        rejects(invalid);
+    }
+
     std::cout << "Client policy validation and grant tests passed\n";
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -708,3 +709,255 @@ func TestConnectionLimitAndControlBindCleanup(t *testing.T) {
 		t.Fatal("expected error when control port is occupied")
 	}
 }
+
+func TestBootstrapCertLANIPsAndDualModePolicy(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := CreateCertificateWithIPs(certPath, keyPath, "teacher-pc", []string{"10.181.203.70", "192.168.10.2"}); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !CertCoversIPs(certPEM, []string{"10.181.203.70", "192.168.10.2"}) {
+		t.Fatal("certificate missing expected LAN IP SANs")
+	}
+	if CertCoversIPs(certPEM, []string{"10.181.203.70", "172.16.1.9"}) {
+		t.Fatal("certificate unexpectedly claimed to cover absent IP")
+	}
+	fp := CertificateFingerprint(certPEM)
+	if len(fp) != 19 || fp[4] != '-' || fp[9] != '-' || fp[14] != '-' {
+		t.Fatalf("unexpected fingerprint format: %q", fp)
+	}
+
+	// RegenerateCertificate atomically replaces cert with new IP SANs.
+	newCertPEM, _, err := RegenerateCertificate(certPath, keyPath, "teacher-pc", []string{"172.16.1.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !CertCoversIPs(newCertPEM, []string{"172.16.1.9"}) {
+		t.Fatal("regenerated cert missing new IP SAN")
+	}
+	if CertificateFingerprint(newCertPEM) == fp {
+		t.Fatal("regenerated cert should have a new fingerprint")
+	}
+
+	// Wire up API + Control handlers with live cert getter and regen hook.
+	st, err := InitializeStore(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.InitializeReleases(); err != nil {
+		t.Fatal(err)
+	}
+	livePEM := certPEM
+	regenCalled := false
+	baseSetup := make([]byte, 2048)
+	copy(baseSetup, "MZ-dummy-setup-binary")
+
+	apiH := NewTeacherHandler(ServerConfig{
+		Store:               st,
+		Control:             false,
+		APIPort:             8443,
+		PublicCertificateFn: func() []byte { return livePEM },
+	})
+	ctrlH := NewTeacherHandler(ServerConfig{
+		Store:               st,
+		Control:             true,
+		ControlCSRF:         "tok-123",
+		SchoolInstaller:     baseSetup,
+		EnrollmentOrigin:    "https://10.181.203.70:8443",
+		APIPort:             8443,
+		LANIPs:              []string{"10.181.203.70"},
+		PublicCertificateFn: func() []byte { return livePEM },
+		RegenerateCertFn: func() error {
+			regenCalled = true
+			livePEM = newCertPEM
+			return nil
+		},
+	})
+	apiSrv := httptest.NewServer(apiH)
+	defer apiSrv.Close()
+	ctrlSrv := httptest.NewServer(ctrlH)
+	defer ctrlSrv.Close()
+
+	// GET /api/bootstrap works on API plane and returns fingerprint + status with zero secrets.
+	resp, err := http.Get(apiSrv.URL + "/api/bootstrap")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("GET /api/bootstrap failed: err=%v status=%v", err, resp)
+	}
+	var boot map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&boot); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if boot["fingerprint"] != fp {
+		t.Fatalf("bootstrap fingerprint mismatch: got %v want %s", boot["fingerprint"], fp)
+	}
+	if boot["maintenance_configured"] != false {
+		t.Fatalf("expected maintenance_configured=false, got %v", boot["maintenance_configured"])
+	}
+	if boot["release_public_key"] != st.ReleaseCatalog.PublicKey {
+		t.Fatalf("unexpected release_public_key: %v", boot["release_public_key"])
+	}
+	// /api/bootstrap must be rejected on control plane.
+	ctrlBootResp, err := http.Get(ctrlSrv.URL + "/api/bootstrap")
+	if err != nil || ctrlBootResp.StatusCode != 404 {
+		t.Fatalf("expected 404 on control /api/bootstrap, got %v %v", err, ctrlBootResp)
+	}
+	_ = ctrlBootResp.Body.Close()
+
+	// GET /teacher-cert.pem on control plane returns current public PEM.
+	certResp, err := http.Get(ctrlSrv.URL + "/teacher-cert.pem")
+	if err != nil || certResp.StatusCode != 200 {
+		t.Fatalf("GET /teacher-cert.pem failed: %v", err)
+	}
+	gotPEM, _ := io.ReadAll(certResp.Body)
+	_ = certResp.Body.Close()
+	if string(gotPEM) != string(certPEM) {
+		t.Fatal("downloaded public cert PEM did not match")
+	}
+
+	// GET /school-installer?host=192.168.10.2 embeds requested host; invalid host returns 400.
+	instResp, err := http.Get(ctrlSrv.URL + "/school-installer?host=192.168.10.2")
+	if err != nil || instResp.StatusCode != 200 {
+		t.Fatalf("GET /school-installer?host=... failed: %v", err)
+	}
+	instBytes, _ := io.ReadAll(instResp.Body)
+	_ = instResp.Body.Close()
+	if !strings.Contains(string(instBytes), "https://192.168.10.2:8443") {
+		t.Fatal("custom host was not embedded in school installer")
+	}
+	badInstResp, err := http.Get(ctrlSrv.URL + "/school-installer?host=bad%20host!")
+	if err != nil || badInstResp.StatusCode != 400 {
+		t.Fatalf("expected 400 for invalid host override, got %v", badInstResp)
+	}
+	_ = badInstResp.Body.Close()
+
+	// POST /regenerate-certificate updates live cert and fingerprint.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	regenResp, err := client.PostForm(ctrlSrv.URL+"/regenerate-certificate", url.Values{"csrf": {"tok-123"}})
+	if err != nil || regenResp.StatusCode != 303 || !regenCalled {
+		t.Fatalf("regenerate-certificate failed: err=%v status=%v called=%v", err, regenResp, regenCalled)
+	}
+	_ = regenResp.Body.Close()
+	resp2, _ := http.Get(apiSrv.URL + "/api/bootstrap")
+	var boot2 map[string]any
+	_ = json.NewDecoder(resp2.Body).Decode(&boot2)
+	_ = resp2.Body.Close()
+	if boot2["fingerprint"] != CertificateFingerprint(newCertPEM) {
+		t.Fatalf("bootstrap did not reflect live regenerated cert: got %v", boot2["fingerprint"])
+	}
+
+	// Dual-mode /policy validation and persistence.
+	badPolicyResp, err := client.PostForm(ctrlSrv.URL+"/policy", url.Values{
+		"csrf":         {"tok-123"},
+		"web_mode":     {"bogus"},
+		"program_mode": {"blacklist"},
+	})
+	if err != nil || badPolicyResp.StatusCode != 400 {
+		t.Fatalf("expected 400 for invalid web_mode, got %v", badPolicyResp)
+	}
+	_ = badPolicyResp.Body.Close()
+
+	badFeatureResp, err := client.PostForm(ctrlSrv.URL+"/policy", url.Values{
+		"csrf":     {"tok-123"},
+		"features": {"unknownprefix:game"},
+	})
+	if err != nil || badFeatureResp.StatusCode != 400 {
+		t.Fatalf("expected 400 for invalid feature prefix, got %v", badFeatureResp)
+	}
+	_ = badFeatureResp.Body.Close()
+
+	goodHash := strings.Repeat("b", 64)
+	okPolicyResp, err := client.PostForm(ctrlSrv.URL+"/policy", url.Values{
+		"csrf":           {"tok-123"},
+		"web_mode":       {"whitelist"},
+		"domains":        {"game.example"},
+		"allow_domains":  {"edu.cn\nwikipedia.org"},
+		"program_mode":   {"whitelist"},
+		"hashes":         {""},
+		"names":          {"game.exe"},
+		"features":       {"orig:plantsvszombies.exe\ntitle:植物大战僵尸"},
+		"allow_hashes":   {goodHash},
+		"allow_names":    {"msedge.exe\ncode.exe"},
+		"allow_features": {"signer:microsoft corporation"},
+	})
+	if err != nil || okPolicyResp.StatusCode != 303 {
+		t.Fatalf("valid dual-mode /policy failed: err=%v status=%v", err, okPolicyResp)
+	}
+	_ = okPolicyResp.Body.Close()
+
+	// Register + approve device and verify /api/device/policy returns all dual-mode fields.
+	devID := strings.Repeat("1", 32)
+	devKey := strings.Repeat("2", 64)
+	regBody, _ := json.Marshal(map[string]any{
+		"id": devID, "key": devKey, "name": "PC-01",
+		"macs": []string{"02:00:00:00:00:01"}, "primary_mac": "02:00:00:00:00:01",
+	})
+	regResp, err := http.Post(apiSrv.URL+"/api/device/register", "application/json", strings.NewReader(string(regBody)))
+	if err != nil || regResp.StatusCode != 201 {
+		t.Fatalf("register failed: %v", err)
+	}
+	_ = regResp.Body.Close()
+	apResp, _ := client.PostForm(ctrlSrv.URL+"/device", url.Values{"csrf": {"tok-123"}, "id": {devID}, "approved": {"1"}})
+	_ = apResp.Body.Close()
+
+	polReq, _ := json.Marshal(map[string]any{"device_id": devID, "device_key": devKey})
+	polResp, err := http.Post(apiSrv.URL+"/api/device/policy", "application/json", strings.NewReader(string(polReq)))
+	if err != nil || polResp.StatusCode != 200 {
+		t.Fatalf("device policy failed: %v", err)
+	}
+	var pol map[string]any
+	_ = json.NewDecoder(polResp.Body).Decode(&pol)
+	_ = polResp.Body.Close()
+	if pol["web_mode"] != "whitelist" || pol["program_mode"] != "whitelist" {
+		t.Fatalf("unexpected modes in policy: %v %v", pol["web_mode"], pol["program_mode"])
+	}
+	if len(pol["allow_web_domains"].([]any)) != 2 || len(pol["program_features"].([]any)) != 2 || len(pol["allow_program_features"].([]any)) != 1 {
+		t.Fatalf("unexpected dual-mode lists in policy: %+v", pol)
+	}
+
+	// Submit pending website & application requests and permanently whitelist them via /request action=whitelist.
+	appHash := strings.Repeat("c", 64)
+	for _, rq := range []map[string]any{
+		{"device_id": devID, "device_key": devKey, "kind": "website", "object": "docs.python.org"},
+		{"device_id": devID, "device_key": devKey, "kind": "application", "object": appHash, "label": "tool.exe"},
+	} {
+		b, _ := json.Marshal(rq)
+		r, err := http.Post(apiSrv.URL+"/api/device/request", "application/json", strings.NewReader(string(b)))
+		if err != nil || r.StatusCode != 201 {
+			t.Fatalf("request submit failed: %v", err)
+		}
+		var out map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&out)
+		_ = r.Body.Close()
+		wlResp, err := client.PostForm(ctrlSrv.URL+"/request", url.Values{"csrf": {"tok-123"}, "id": {out["id"]}, "action": {"whitelist"}})
+		if err != nil || wlResp.StatusCode != 303 {
+			t.Fatalf("whitelist action failed: err=%v status=%v", err, wlResp)
+		}
+		_ = wlResp.Body.Close()
+	}
+
+	st.mu.Lock()
+	hasSite := false
+	for _, d := range st.Data.AllowWebDomains {
+		if d == "docs.python.org" {
+			hasSite = true
+		}
+	}
+	hasApp := false
+	for _, hv := range st.Data.AllowProgramHashes {
+		if hv == appHash {
+			hasApp = true
+		}
+	}
+	st.mu.Unlock()
+	if !hasSite || !hasApp {
+		t.Fatalf("permanent whitelist action did not update store: hasSite=%v hasApp=%v", hasSite, hasApp)
+	}
+}
+

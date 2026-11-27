@@ -77,7 +77,7 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
           if not defined VSDIR exit /b 1
           call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat"
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\update_configuration.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\service.cpp windows\update_configuration.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp windows\agent.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-service.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib version.lib user32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_gui.cpp windows\request_client.cpp src\policy.cpp /Fe:ohno-request.exe advapi32.lib user32.lib /link /SUBSYSTEM:WINDOWS
@@ -119,7 +119,7 @@ jobs:
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DOHNO_UPDATE_IO_TESTING tests\windows_update_runtime.cpp windows\update_runtime.cpp windows\worker_process.cpp windows\update_client.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:update-runtime-test.exe bcrypt.lib winhttp.lib crypt32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\maintenance_http.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\worker.cpp windows\agent.cpp windows\maintenance_http.cpp windows\monitor.cpp windows\browser_policy.cpp windows\network_filter.cpp windows\request_pipe.cpp windows\tun_manager.cpp src\policy.cpp /Fe:ohno-worker.exe crypt32.lib advapi32.lib winhttp.lib bcrypt.lib wtsapi32.lib fwpuclnt.lib rpcrt4.lib iphlpapi.lib version.lib user32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_update_probe.cpp windows\update_configuration.cpp windows\update_verify.cpp windows\maintenance_http.cpp /Fe:installed-update-probe.exe advapi32.lib bcrypt.lib winhttp.lib crypt32.lib
@@ -165,13 +165,17 @@ jobs:
           ohno-tun.exe check -c generated-tun.json
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
+          tun-config.exe --whitelist > generated-tun-wl.json
+          ohno-tun.exe check -c generated-tun-wl.json
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_installed_payload.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp /Fe:installed-payload-test.exe bcrypt.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           rc /fo maintenance.res windows\maintenance.rc
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE /DOHNO_PAYLOAD_MAINTENANCE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp maintenance.res /Fe:ohno-maintenance.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE /DOHNO_PAYLOAD_MAINTENANCE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp maintenance.res /Fe:ohno-maintenance.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib gdi32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\request_launcher.cpp windows\update_configuration.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp /Fe:ohno-request-launcher.exe advapi32.lib user32.lib bcrypt.lib /link /SUBSYSTEM:WINDOWS
@@ -183,7 +187,7 @@ jobs:
           rc /fo setup.res windows\setup.rc
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /DUNICODE /D_UNICODE windows\setup.cpp windows\setup_ui.cpp windows\setup_bundle_win.cpp windows\maintenance_http.cpp windows\browser_policy.cpp src\policy.cpp windows\installed_payload.cpp windows\update_payload.cpp windows\update_journal.cpp windows\update_verify.cpp setup.res /Fe:ohno-setup.exe advapi32.lib shell32.lib ole32.lib winhttp.lib crypt32.lib uuid.lib comdlg32.lib user32.lib gdi32.lib /link /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /std:c++17 /EHsc /W4 /MT /Isrc tests\policy_test.cpp src\policy.cpp /Fe:policy-test.exe
@@ -196,6 +200,12 @@ jobs:
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           client-policy-test.exe
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\feature_match_test.cpp /Fe:feature-match-test.exe
+          if errorlevel 1 exit /b 1
+          if not errorlevel 0 exit /b 1
+          feature-match-test.exe
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           cl /utf-8 /std:c++17 /EHsc /W4 /MT /Isrc tests\approval_queue_test.cpp src\policy.cpp /Fe:approval-queue-test.exe
@@ -240,16 +250,16 @@ jobs:
           cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_target.cpp /Fe:test-target.exe
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_origin_test.cpp windows\monitor.cpp /Fe:origin-test.exe bcrypt.lib wtsapi32.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_origin_test.cpp windows\monitor.cpp /Fe:origin-test.exe bcrypt.lib wtsapi32.lib version.lib crypt32.lib user32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           origin-test.exe
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_monitor_test.cpp windows\monitor.cpp /Fe:monitor-test.exe bcrypt.lib wtsapi32.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_monitor_test.cpp windows\monitor.cpp /Fe:monitor-test.exe bcrypt.lib wtsapi32.lib version.lib crypt32.lib user32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
-          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_hash_test.cpp windows\monitor.cpp /Fe:hash-test.exe bcrypt.lib wtsapi32.lib
+          cl /utf-8 /std:c++17 /EHsc /W4 /MT tests\windows_hash_test.cpp windows\monitor.cpp /Fe:hash-test.exe bcrypt.lib wtsapi32.lib version.lib crypt32.lib user32.lib
           if errorlevel 1 exit /b 1
           if not errorlevel 0 exit /b 1
           hash-test.exe

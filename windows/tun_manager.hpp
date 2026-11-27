@@ -15,5 +15,5 @@ public:
     ~TunManager();
     TunManager(const TunManager&)=delete;
     TunManager& operator=(const TunManager&)=delete;
-    bool ensure(const std::vector<std::string>& blocked,const std::vector<std::string>& allowed);
+    bool ensure(const std::vector<std::string>& domains,const std::vector<std::string>& allowed,bool whitelist_mode=false);
 };
