@@ -29,7 +29,7 @@ inline bool valid_program_name(const std::string& name) {
         return false;
     return std::all_of(name.begin(), name.end(), [](unsigned char c) {
         return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-               c == '_' || c == '.' || c == ' ' || c == '-';
+               c == '_' || c == '.' || c == ' ' || c == '-' || c == '+';
     });
 }
 

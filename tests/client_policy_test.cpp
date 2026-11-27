@@ -63,7 +63,7 @@ int main() {
         "program_names": ["game.exe"],
         "program_features": ["orig:plantsvszombies.exe", "title:植物大战僵尸"],
         "allow_program_hashes": [")" + hash + R"("],
-        "allow_program_names": ["msedge.exe"],
+        "allow_program_names": ["msedge.exe", "notepad++.exe"],
         "allow_program_features": ["signer:microsoft corporation"],
         "block_local_files": true,
         "grants": [{"kind":"website","object":"docs.python.org","expires":200}]

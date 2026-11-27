@@ -25,7 +25,7 @@ const (
 
 var (
 	MACRegexp         = regexp.MustCompile(`^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$`)
-	ProgramNameRegexp = regexp.MustCompile(`^[a-z0-9_. -]{1,128}\.exe$`)
+	ProgramNameRegexp = regexp.MustCompile(`^[a-z0-9_. +-]{1,128}\.exe$`)
 	PINRegexp         = regexp.MustCompile(`^[0-9]{4,8}$`)
 
 	DefaultWebDomains = []string{"classic.minecraft.net", "eaglercraft.com"}

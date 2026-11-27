@@ -852,6 +852,18 @@ func TestBootstrapCertLANIPsAndDualModePolicy(t *testing.T) {
 		t.Fatalf("bootstrap did not reflect live regenerated cert: got %v", boot2["fingerprint"])
 	}
 
+	// Partial /policy POST (e.g. legacy form without allow_* fields) must succeed with InitializeStore defaults.
+	legacyPolicyResp, err := client.PostForm(ctrlSrv.URL+"/policy", url.Values{
+		"csrf":    {"tok-123"},
+		"domains": {"game.example"},
+		"hashes":  {""},
+		"names":   {"game.exe"},
+	})
+	if err != nil || legacyPolicyResp.StatusCode != 303 {
+		t.Fatalf("partial /policy with InitializeStore defaults failed: err=%v status=%v", err, legacyPolicyResp)
+	}
+	_ = legacyPolicyResp.Body.Close()
+
 	// Dual-mode /policy validation and persistence.
 	badPolicyResp, err := client.PostForm(ctrlSrv.URL+"/policy", url.Values{
 		"csrf":         {"tok-123"},
