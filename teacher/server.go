@@ -39,16 +39,20 @@ const (
 
 // ServerConfig configures an API or Control HTTP(S) server instance.
 type ServerConfig struct {
-	Store             *Store
-	Control           bool
-	ControlCSRF       string
-	SchoolInstaller   []byte
-	SchoolInstallerFn func() ([]byte, error)
-	EnrollmentOrigin  string
-	PublicCertificate []byte
-	RequestTimeout    time.Duration
-	TraceUpdateHTTP   bool
-	Clock             func() time.Time
+	Store               *Store
+	Control             bool
+	ControlCSRF         string
+	SchoolInstaller     []byte
+	SchoolInstallerFn   func() ([]byte, error)
+	EnrollmentOrigin    string
+	APIPort             int
+	LANIPs              []string
+	PublicCertificate   []byte
+	PublicCertificateFn func() []byte
+	RegenerateCertFn    func() error
+	RequestTimeout      time.Duration
+	TraceUpdateHTTP     bool
+	Clock               func() time.Time
 }
 
 // boundedListener limits concurrent active connections and immediately closes
@@ -105,17 +109,21 @@ func (c *trackedConn) Close() error {
 
 // TeacherHandler implements both the loopback control UI and the separate LAN HTTPS device API.
 type TeacherHandler struct {
-	mu                sync.RWMutex
-	store             *Store
-	control           bool
-	controlCSRF       string
-	schoolInstaller   []byte
-	schoolInstallerFn func() ([]byte, error)
-	enrollmentOrigin  string
-	publicCertificate []byte
-	requestTimeout    time.Duration
-	traceUpdateHTTP   bool
-	clock             func() time.Time
+	mu                  sync.RWMutex
+	store               *Store
+	control             bool
+	controlCSRF         string
+	schoolInstaller     []byte
+	schoolInstallerFn   func() ([]byte, error)
+	enrollmentOrigin    string
+	apiPort             int
+	lanIPs              []string
+	publicCertificate   []byte
+	publicCertificateFn func() []byte
+	regenerateCertFn    func() error
+	requestTimeout      time.Duration
+	traceUpdateHTTP     bool
+	clock               func() time.Time
 }
 
 // NewTeacherHandler creates a TeacherHandler from cfg.
@@ -128,17 +136,32 @@ func NewTeacherHandler(cfg ServerConfig) *TeacherHandler {
 	if clk == nil {
 		clk = time.Now
 	}
+	apiPort := cfg.APIPort
+	if apiPort <= 0 && cfg.EnrollmentOrigin != "" {
+		if u, err := url.Parse(cfg.EnrollmentOrigin); err == nil && u.Port() != "" {
+			if p, err := strconv.Atoi(u.Port()); err == nil && p > 0 && p <= 65535 {
+				apiPort = p
+			}
+		}
+	}
+	if apiPort <= 0 {
+		apiPort = 8443
+	}
 	return &TeacherHandler{
-		store:             cfg.Store,
-		control:           cfg.Control,
-		controlCSRF:       cfg.ControlCSRF,
-		schoolInstaller:   cfg.SchoolInstaller,
-		schoolInstallerFn: cfg.SchoolInstallerFn,
-		enrollmentOrigin:  cfg.EnrollmentOrigin,
-		publicCertificate: cfg.PublicCertificate,
-		requestTimeout:    timeout,
-		traceUpdateHTTP:   cfg.TraceUpdateHTTP,
-		clock:             clk,
+		store:               cfg.Store,
+		control:             cfg.Control,
+		controlCSRF:         cfg.ControlCSRF,
+		schoolInstaller:     cfg.SchoolInstaller,
+		schoolInstallerFn:   cfg.SchoolInstallerFn,
+		enrollmentOrigin:    cfg.EnrollmentOrigin,
+		apiPort:             apiPort,
+		lanIPs:              append([]string{}, cfg.LANIPs...),
+		publicCertificate:   cfg.PublicCertificate,
+		publicCertificateFn: cfg.PublicCertificateFn,
+		regenerateCertFn:    cfg.RegenerateCertFn,
+		requestTimeout:      timeout,
+		traceUpdateHTTP:     cfg.TraceUpdateHTTP,
+		clock:               clk,
 	}
 }
 
@@ -154,6 +177,13 @@ func (h *TeacherHandler) getStore() *Store {
 	s := h.store
 	h.mu.RUnlock()
 	return s
+}
+
+func (h *TeacherHandler) currentPublicCert() []byte {
+	if h.publicCertificateFn != nil {
+		return h.publicCertificateFn()
+	}
+	return h.publicCertificate
 }
 
 func (h *TeacherHandler) isControl(r *http.Request) bool {
@@ -344,6 +374,14 @@ func (h *TeacherHandler) doGet(w http.ResponseWriter, r *http.Request) {
 		h.jsonReply(w, r, 200, map[string]any{"ok": true, "control": h.control})
 		return
 	}
+	if path == "/api/bootstrap" {
+		if h.control {
+			h.replyText(w, r, 404, "Not found")
+			return
+		}
+		h.serveBootstrap(w, r)
+		return
+	}
 	if path == "/api/device/policy" {
 		if h.control {
 			h.replyText(w, r, 404, "Not found")
@@ -360,6 +398,10 @@ func (h *TeacherHandler) doGet(w http.ResponseWriter, r *http.Request) {
 		h.reply(w, r, 200, updateUIJS, "application/javascript; charset=utf-8", nil)
 		return
 	}
+	if path == "/teacher-cert.pem" {
+		h.servePublicCert(w, r)
+		return
+	}
 	if path == "/school-installer" {
 		h.serveSchoolInstaller(w, r)
 		return
@@ -369,6 +411,35 @@ func (h *TeacherHandler) doGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.renderDashboard(w, r)
+}
+
+func (h *TeacherHandler) serveBootstrap(w http.ResponseWriter, r *http.Request) {
+	store := h.getStore()
+	store.mu.Lock()
+	maintConfigured := store.Data.MaintenanceCredential != nil
+	pubKey := ""
+	if store.ReleaseCatalog != nil {
+		pubKey = store.ReleaseCatalog.PublicKey
+	}
+	store.mu.Unlock()
+	fp := CertificateFingerprint(h.currentPublicCert())
+	// Public non-secret bootstrap metadata only: never passwords, PINs, or keys.
+	h.jsonReply(w, r, 200, map[string]any{
+		"fingerprint":            fp,
+		"maintenance_configured": maintConfigured,
+		"release_public_key":     pubKey,
+	})
+}
+
+func (h *TeacherHandler) servePublicCert(w http.ResponseWriter, r *http.Request) {
+	certPEM := h.currentPublicCert()
+	if len(certPEM) == 0 {
+		h.replyText(w, r, 503, "Public certificate is not available")
+		return
+	}
+	h.reply(w, r, 200, certPEM, "application/x-pem-file", [][2]string{
+		{"Content-Disposition", `attachment; filename="teacher-cert.pem"`},
+	})
 }
 
 func (h *TeacherHandler) baseSetupBytes() ([]byte, error) {
@@ -382,7 +453,7 @@ func (h *TeacherHandler) baseSetupBytes() ([]byte, error) {
 }
 
 func (h *TeacherHandler) hasSchoolInstaller() bool {
-	if h.enrollmentOrigin == "" || len(h.publicCertificate) == 0 {
+	if h.enrollmentOrigin == "" || len(h.currentPublicCert()) == 0 {
 		return false
 	}
 	return len(h.schoolInstaller) > 0 || h.schoolInstallerFn != nil
@@ -392,6 +463,15 @@ func (h *TeacherHandler) serveSchoolInstaller(w http.ResponseWriter, r *http.Req
 	if !h.hasSchoolInstaller() {
 		h.replyText(w, r, 503, "School installer is not available")
 		return
+	}
+	origin := h.enrollmentOrigin
+	if customHost := strings.TrimSpace(r.URL.Query().Get("host")); customHost != "" {
+		customOrigin, err := EnrollmentOrigin(customHost, h.apiPort)
+		if err != nil {
+			h.replyText(w, r, 400, "Invalid enrollment host")
+			return
+		}
+		origin = customOrigin
 	}
 	setupBytes, err := h.baseSetupBytes()
 	if err != nil || len(setupBytes) == 0 {
@@ -405,7 +485,7 @@ func (h *TeacherHandler) serveSchoolInstaller(w http.ResponseWriter, r *http.Req
 		pubKey = store.ReleaseCatalog.PublicKey
 	}
 	store.mu.Unlock()
-	packaged, err := BuildSchoolInstaller(setupBytes, h.enrollmentOrigin, h.publicCertificate, pubKey)
+	packaged, err := BuildSchoolInstaller(setupBytes, origin, h.currentPublicCert(), pubKey)
 	if err != nil {
 		h.replyText(w, r, 503, "Cannot prepare school installer")
 		return
@@ -416,15 +496,16 @@ func (h *TeacherHandler) serveSchoolInstaller(w http.ResponseWriter, r *http.Req
 }
 
 const uiStyle = `<style>
-:root{--bg:#f5f7fb;--card:#fff;--ink:#1f2937;--muted:#5b6778;--accent:#1d4ed8;--border:#dde3ec;--ok:#15693c;--ok-bg:#e8f6ee;--warn:#9a4a00;--warn-bg:#fef3e2}
+:root{--bg:#f4f6fa;--card:#fff;--ink:#1f2937;--muted:#5b6778;--accent:#1d4ed8;--border:#dde3ec;--ok:#15693c;--ok-bg:#e8f6ee;--warn:#9a4a00;--warn-bg:#fef3e2;--err:#991b1b;--err-bg:#fee2e2}
 *{box-sizing:border-box}
 body{font:15px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:1.5rem 1rem}
-main{max-width:1080px;margin:0 auto}
+main{max-width:1120px;margin:0 auto}
 h1{margin:0 0 .25rem;color:#162b54;font-size:1.65rem}
 h2{margin:0 0 .65rem;font-size:1.15rem;color:#1e3a6d}
-section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.1rem 1.25rem;margin:1rem 0;box-shadow:0 1px 2px rgba(15,23,42,.04)}
-input,textarea,button{font:inherit;padding:.45rem .65rem;border:1px solid #cbd5e1;border-radius:6px;max-width:100%}
-textarea{width:100%;height:7rem;display:block;margin:.3rem 0 .8rem;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+h3{margin:.9rem 0 .4rem;font-size:1rem;color:#1f2937}
+section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.15rem 1.3rem;margin:1rem 0;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+input,textarea,select,button{font:inherit;padding:.45rem .65rem;border:1px solid #cbd5e1;border-radius:6px;max-width:100%}
+textarea{width:100%;height:6.5rem;display:block;margin:.3rem 0 .75rem;font-family:ui-monospace,Consolas,monospace;font-size:13px}
 button{cursor:pointer;background:#f8fafc;color:var(--ink)}
 button:hover{background:#eef2f7}
 button[type="submit"],.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -433,11 +514,21 @@ table{border-collapse:collapse;width:100%;font-size:14px}
 td,th{padding:.55rem .5rem;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
 th{color:var(--muted);font-weight:600}
 small{color:var(--muted)}
-.badge{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:12px;font-weight:600}
+code{background:#f1f5f9;padding:.1rem .35rem;border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.badge{display:inline-block;padding:.12rem .55rem;border-radius:999px;font-size:12px;font-weight:600}
 .ok{color:var(--ok);background:var(--ok-bg)}
 .pending{color:var(--warn);background:var(--warn-bg)}
-.dl{display:inline-block;padding:.5rem .9rem;background:var(--accent);color:#fff;text-decoration:none;border-radius:6px;font-weight:600}
+.danger{color:var(--err);background:var(--err-bg)}
+.dl{display:inline-block;padding:.5rem .95rem;background:var(--accent);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;margin-right:.5rem}
 .dl:hover{background:#1e40af}
+.dl-sec{display:inline-block;padding:.45rem .85rem;background:#f8fafc;color:var(--ink);text-decoration:none;border:1px solid #cbd5e1;border-radius:6px}
+.dl-sec:hover{background:#eef2f7}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem}
+.box{background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:.85rem 1rem}
+.fp{font-family:ui-monospace,Consolas,monospace;font-size:1.15rem;font-weight:700;letter-spacing:.06em;color:#162b54}
+.mode-row{display:flex;gap:1.25rem;flex-wrap:wrap;margin:.4rem 0 .75rem;padding:.55rem .75rem;background:#f8fafc;border:1px solid var(--border);border-radius:8px}
+.mode-row label{display:flex;align-items:center;gap:.35rem;cursor:pointer;font-weight:600}
+.alert{padding:.65rem .85rem;border-radius:8px;margin:.6rem 0;border:1px solid #f59e0b;background:#fffbeb;color:#78350f}
 </style>`
 
 func esc(s string) string { return html.EscapeString(s) }
@@ -464,9 +555,16 @@ func (h *TeacherHandler) renderDashboard(w http.ResponseWriter, r *http.Request)
 	for i := len(store.Data.Requests) - 1; i >= startReq; i-- {
 		reqs = append(reqs, *store.Data.Requests[i])
 	}
+	webMode := store.Data.WebMode
 	domains := strings.Join(store.Data.WebDomains, "\n")
+	allowDomains := strings.Join(store.Data.AllowWebDomains, "\n")
+	programMode := store.Data.ProgramMode
 	hashes := strings.Join(store.Data.ProgramHashes, "\n")
 	names := strings.Join(store.Data.ProgramNames, "\n")
+	features := strings.Join(store.Data.ProgramFeatures, "\n")
+	allowHashes := strings.Join(store.Data.AllowProgramHashes, "\n")
+	allowNames := strings.Join(store.Data.AllowProgramNames, "\n")
+	allowFeatures := strings.Join(store.Data.AllowProgramFeatures, "\n")
 	blockLocalFiles := store.Data.BlockLocalFiles
 	revision := store.Data.PolicyRevision
 	pinEnabled := store.Data.UnlockPINHash != nil && *store.Data.UnlockPINHash != ""
@@ -580,7 +678,11 @@ func (h *TeacherHandler) renderDashboard(w http.ResponseWriter, r *http.Request)
 	for _, item := range reqs {
 		action := ""
 		if item.State == "pending" {
-			action = `<form method="post" action="/request">` + hidden + `<input type="hidden" name="id" value="` + esc(item.ID) + `"><button name="action" value="approve">允许 1 小时</button> <button name="action" value="deny">拒绝</button></form>`
+			wlBtn := ""
+			if item.Kind == "website" || item.Kind == "application" {
+				wlBtn = ` <button name="action" value="whitelist">永久加入白名单</button>`
+			}
+			action = `<form method="post" action="/request">` + hidden + `<input type="hidden" name="id" value="` + esc(item.ID) + `"><button name="action" value="approve">允许 1 小时</button>` + wlBtn + ` <button name="action" value="deny">拒绝</button></form>`
 		}
 		shortID := item.DeviceID
 		if len(shortID) > 12 {
@@ -593,13 +695,131 @@ func (h *TeacherHandler) renderDashboard(w http.ResponseWriter, r *http.Request)
 		reqRows.WriteString(`<tr><td>` + esc(shortID) + `</td><td>` + esc(item.Kind) + `</td><td>` + objText + `</td><td>` + esc(item.State) + `</td><td>` + action + `</td></tr>`)
 	}
 
+	certPEM := h.currentPublicCert()
+	certFP := CertificateFingerprint(certPEM)
+	lanIPs := h.lanIPs
+	if len(lanIPs) == 0 {
+		lanIPs = DetectLANIPs()
+	}
+	certCoversAll := CertCoversIPs(certPEM, lanIPs)
+	dnsSANs, ipSANs := CertSANSummary(certPEM)
+
 	var c strings.Builder
-	c.WriteString(`<main><h1>ohno 教师端</h1><p>仅本机可管理 · 策略版本 ` + strconv.Itoa(revision) + `</p>`)
-	maintStatus := `<span class="badge pending">未设置，维护授权拒绝</span>`
+	webModeBadge := `<span class="badge ok">网站黑名单</span>`
+	if webMode == "whitelist" {
+		webModeBadge = `<span class="badge pending">网站白名单</span>`
+	}
+	progModeBadge := `<span class="badge ok">程序黑名单</span>`
+	if programMode == "whitelist" {
+		progModeBadge = `<span class="badge pending">程序白名单</span>`
+	}
+	c.WriteString(`<main><h1>ohno 教师端</h1><p>仅本机可管理 · 策略版本 ` + strconv.Itoa(revision) + ` · ` + webModeBadge + ` ` + progModeBadge + `</p>`)
+
+	// Top quick deployment card.
+	maintStatus := `<span class="badge danger">未设置（学生机安装会被拒绝）</span>`
 	if maintenanceEnabled {
 		maintStatus = `<span class="badge ok">已设置</span>`
 	}
-	c.WriteString(`<section><h2>教师维护密码（安装 / 卸载）</h2><p>仅用于新增安装 / 卸载授权，不是后台登录或课堂 PIN。镜像分发后的启动不重复输入。支持一句话式长口令，不要求大小写或符号组合。当前：` + maintStatus + `</p><p><small>安装器在安装 / 卸载时在线验证此密码。系统管理员仍可通过标准 Windows 恢复途径处理故障。</small></p><form method="post" action="/maintenance-password">` + hidden + `<input name="maintenance_password" type="password" aria-label="教师维护密码" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12–128 字符的维护密码"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear" formnovalidate>停用维护授权</button></form></section>`)
+	c.WriteString(`<section><h2>学生机快速部署（3 步完成）</h2>`)
+	c.WriteString(`<div class="grid"><div class="box"><strong>第 1 步：设置教师维护密码</strong><p>当前状态：` + maintStatus + `</p><small>安装或卸载学生机时在线验证（12–128 字符，支持一句话长口令）。</small></div>`)
+	c.WriteString(`<div class="box"><strong>第 2 步：学生机连接地址与证书指纹</strong>`)
+	if len(lanIPs) > 0 {
+		c.WriteString(`<p>局域网地址：<code>` + esc(lanIPs[0]) + `:` + strconv.Itoa(h.apiPort) + `</code></p>`)
+	} else if h.enrollmentOrigin != "" {
+		c.WriteString(`<p>教师端地址：<code>` + esc(h.enrollmentOrigin) + `</code></p>`)
+	}
+	if certFP != "" {
+		c.WriteString(`<p>证书 SHA-256 指纹：<span class="fp">` + esc(certFP) + `</span></p>`)
+	}
+	c.WriteString(`<small>证书已覆盖地址：` + esc(strings.Join(append(dnsSANs, ipSANs...), ", ")) + `</small></div></div>`)
+
+	if len(certPEM) > 0 && len(lanIPs) > 0 && !certCoversAll {
+		c.WriteString(`<div class="alert"><strong>检测到局域网 IP 变更：</strong>当前 HTTPS 证书未包含本机全部局域网 IP（<code>` + esc(strings.Join(lanIPs, ", ")) + `</code>），按 IP 连接学生机将报证书不匹配。`)
+		if h.regenerateCertFn != nil {
+			c.WriteString(`<form method="post" action="/regenerate-certificate" style="margin-top:.5rem">` + hidden + `<button type="submit">一键重新签发含当前局域网 IP 的证书</button></form>`)
+		}
+		c.WriteString(`</div>`)
+	}
+
+	c.WriteString(`<div style="margin-top:.85rem"><strong>第 3 步：安装学生机（二选一）</strong>`)
+	if h.hasSchoolInstaller() {
+		// Build selectable host list: detected LAN IPs + default enrollment host.
+		var hostOpts []string
+		seenHost := map[string]bool{}
+		for _, ip := range lanIPs {
+			if !seenHost[ip] {
+				seenHost[ip] = true
+				hostOpts = append(hostOpts, ip)
+			}
+		}
+		if u, err := url.Parse(h.enrollmentOrigin); err == nil && u.Hostname() != "" {
+			if !seenHost[u.Hostname()] {
+				seenHost[u.Hostname()] = true
+				hostOpts = append(hostOpts, u.Hostname())
+			}
+		}
+		c.WriteString(`<form method="get" action="/school-installer" style="margin:.55rem 0;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">`)
+		c.WriteString(`<label>方式 A（推荐，免输地址）：<select name="host">`)
+		for _, hostOpt := range hostOpts {
+			c.WriteString(`<option value="` + esc(hostOpt) + `">https://` + esc(hostOpt) + `:` + strconv.Itoa(h.apiPort) + `</option>`)
+		}
+		c.WriteString(`</select></label> <button type="submit" class="primary">下载专属 Ohno-School-Setup.exe</button>`)
+		if len(certPEM) > 0 {
+			c.WriteString(` <a class="dl-sec" href="/teacher-cert.pem">下载公开证书 (.pem)</a>`)
+		}
+		c.WriteString(`</form>`)
+	} else if len(certPEM) > 0 {
+		c.WriteString(`<p><a class="dl-sec" href="/teacher-cert.pem">下载公开证书 (teacher-cert.pem)</a></p>`)
+	}
+	c.WriteString(`<p><small>方式 B（通用安装器）：直接运行 <code>ohno-setup.exe</code>，只需输入上方局域网 IP，点击「连接教师端」自动获取证书并核对指纹 <strong>` + esc(certFP) + `</strong>，输入维护密码即可一键安装，无需手动找证书文件。</small></p>`)
+	c.WriteString(`<p><small>如学生机无法连接教师端，请在教师机管理员 PowerShell 执行放行端口：<code>New-NetFirewallRule -DisplayName "Ohno Teacher API" -Direction Inbound -Protocol TCP -LocalPort ` + strconv.Itoa(h.apiPort) + ` -Action Allow</code></small></p>`)
+	c.WriteString(`</section>`)
+
+	c.WriteString(`<section><h2>教师维护密码（安装 / 卸载）</h2><p>仅用于新增安装 / 卸载授权，不是后台登录或课堂 PIN。镜像分发后的启动不重复输入。支持一句话式长口令，不要求大小写或符号组合。当前：` + maintStatus + `</p><form method="post" action="/maintenance-password">` + hidden + `<input name="maintenance_password" type="password" aria-label="教师维护密码" minlength="12" maxlength="128" autocomplete="new-password" placeholder="12–128 字符的维护密码"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear" formnovalidate>停用维护授权</button></form></section>`)
+
+	webBL, webWL := "", ""
+	if webMode == "whitelist" {
+		webWL = " checked"
+	} else {
+		webBL = " checked"
+	}
+	progBL, progWL := "", ""
+	if programMode == "whitelist" {
+		progWL = " checked"
+	} else {
+		progBL = " checked"
+	}
+	checked := ""
+	if blockLocalFiles {
+		checked = " checked"
+	}
+
+	c.WriteString(`<section><h2>网站与程序策略（特征识别 + 黑名单 / 白名单双模式）</h2><form method="post" action="/policy">` + hidden)
+	c.WriteString(`<h3>1. 网站访问模式</h3><div class="mode-row"><label><input type="radio" name="web_mode" value="blacklist"` + webBL + `> 黑名单模式（默认允许上网，仅拦截下方黑名单域名）</label><label><input type="radio" name="web_mode" value="whitelist"` + webWL + `> 白名单模式（仅允许下方白名单域名与临时批准，其余网页全部拦截）</label></div>`)
+	c.WriteString(`<div class="grid"><div><label>网站黑名单域名（黑名单模式生效，每行一个）<textarea name="domains" placeholder="classic.minecraft.net&#10;eaglercraft.com">` + esc(domains) + `</textarea></label></div><div><label>网站白名单域名（白名单模式生效，每行一个）<textarea name="allow_domains" placeholder="edu.cn&#10;wikipedia.org&#10;bing.com">` + esc(allowDomains) + `</textarea></label></div></div>`)
+	c.WriteString(`<p><label><input type="checkbox" name="block_local_files" value="1"` + checked + `> 限制 Edge 打开本地文件（<code>file://*</code>）</label></p>`)
+
+	c.WriteString(`<h3>2. 程序控制模式与多维特征识别</h3><div class="mode-row"><label><input type="radio" name="program_mode" value="blacklist"` + progBL + `> 黑名单模式（拦截命中文件名 / 特征 / SHA-256 的程序）</label><label><input type="radio" name="program_mode" value="whitelist"` + progWL + `> 白名单模式（仅放行系统进程与下方白名单程序，其余学生运行程序一律拦截）</label></div>`)
+	c.WriteString(`<p><small>防改名特征规则语法（每行一条，不区分大小写，支持中文）：<code>orig:原文件名</code>（PE 原始文件名，改名无效）· <code>product:产品名</code> · <code>company:发行厂商</code> · <code>desc:文件描述</code> · <code>signer:数字签名者</code> · <code>title:窗口标题</code> · <code>path:路径片段</code> · 无前缀默认匹配全部字段。</small></p>`)
+	c.WriteString(`<div class="grid"><div class="box"><strong>黑名单规则（黑名单模式生效）</strong>`)
+	c.WriteString(`<label>屏蔽程序特征规则（防改名）<textarea name="features" placeholder="orig:plantsvszombies.exe&#10;company:valve&#10;title:植物大战僵尸">` + esc(features) + `</textarea></label>`)
+	c.WriteString(`<label>屏蔽程序文件名（如 game.exe）<textarea name="names">` + esc(names) + `</textarea></label>`)
+	c.WriteString(`<label>屏蔽程序 SHA-256<textarea name="hashes">` + esc(hashes) + `</textarea></label></div>`)
+
+	c.WriteString(`<div class="box"><strong>白名单规则（白名单模式生效，Windows 系统组件自动保护）</strong>`)
+	c.WriteString(`<label>允许程序特征规则<textarea name="allow_features" placeholder="signer:microsoft corporation&#10;company:kingsoft">` + esc(allowFeatures) + `</textarea></label>`)
+	c.WriteString(`<label>允许程序文件名<textarea name="allow_names" placeholder="msedge.exe&#10;wps.exe&#10;code.exe">` + esc(allowNames) + `</textarea></label>`)
+	c.WriteString(`<label>允许程序 SHA-256（也可在下方审批列表一键加入）<textarea name="allow_hashes">` + esc(allowHashes) + `</textarea></label></div></div>`)
+	c.WriteString(`<p style="margin-top:.85rem"><button type="submit" class="primary">保存并推送全部规则</button></p></form></section>`)
+
+	c.WriteString(`<section><h2>设备</h2><p><small>MAC 用于设备关联；DHCP IP 仅显示最近地址。真正认证仍使用每机独立密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>MAC</th><th>最近 IP</th><th>状态</th><th>操作</th></tr>` + rows.String() + `</table></section>`)
+	c.WriteString(`<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>` + reqRows.String() + `</table></section>`)
+
+	pinStatus := `<span class="badge pending">关闭</span>`
+	if pinEnabled {
+		pinStatus = `<span class="badge ok">已启用</span>`
+	}
+	c.WriteString(`<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；后台管理仅在教师机本地开放并免登录。当前：` + pinStatus + `</p><form method="post" action="/unlock-pin">` + hidden + `<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>`)
 
 	c.WriteString(`<section><h2>客户端受管升级</h2><p>只下发教师明确批准的本地构建，不自动信任上游 latest。日常批准不重复输入维护密码。</p>`)
 	if releaseError {
@@ -615,25 +835,7 @@ func (h *TeacherHandler) renderDashboard(w http.ResponseWriter, r *http.Request)
 		c.WriteString(`<form id="update-approval">` + hidden + `<input type="file" accept=".ohno" aria-label="本地 OHNO 更新包" required> <button type="submit">验证并批准此包</button> <button type="button" id="cancel-update-upload" disabled>取消请求</button></form><p id="update-upload-status" role="status"></p><script src="/updates.js" defer></script>`)
 		c.WriteString(`<form method="post" action="/updates/pause">` + hidden + `<button>暂停下发与执行授权</button></form>`)
 	}
-	c.WriteString(`</section>`)
-
-	pinStatus := `<span class="badge pending">关闭</span>`
-	if pinEnabled {
-		pinStatus = `<span class="badge ok">已启用</span>`
-	}
-	c.WriteString(`<section><h2>课堂解锁 PIN</h2><p>可选，只用于学生机现场暂停限制 1 小时；后台管理仅在教师机本地开放并免登录。当前：` + pinStatus + `</p><form method="post" action="/unlock-pin">` + hidden + `<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="4–8 位数字"> <button name="action" value="set">设置 / 更新</button> <button name="action" value="clear">关闭 PIN 解锁</button></form></section>`)
-
-	checked := ""
-	if blockLocalFiles {
-		checked = " checked"
-	}
-	c.WriteString(`<section><h2>网站与程序规则</h2><form method="post" action="/policy">` + hidden + `<label>屏蔽域名<textarea name="domains">` + esc(domains) + `</textarea></label><label>屏蔽程序 SHA-256<textarea name="hashes">` + esc(hashes) + `</textarea></label><label>屏蔽程序文件名<textarea name="names">` + esc(names) + `</textarea></label><p><label><input type="checkbox" name="block_local_files" value="1"` + checked + `> 限制 Edge 打开本地文件</label></p><button type="submit">保存规则</button></form></section>`)
-
-	if h.hasSchoolInstaller() {
-		c.WriteString(`<section><h2>学生机一键安装</h2><p><a class="dl" href="/school-installer">下载 Ohno-School-Setup.exe</a></p><p>复制到模板机双击、允许 UAC，再输入教师维护密码。镜像分发后不重复输入。</p><small>包内只有教师 API 地址、公开证书及已初始化的发布验证公钥，没有教师 PIN、密码或私钥。</small></section>`)
-	}
-	c.WriteString(`<section><h2>设备</h2><p><small>MAC 用于设备关联；DHCP IP 仅显示最近地址。真正认证仍使用每机独立密钥。</small></p><table><tr><th>名称</th><th>ID</th><th>MAC</th><th>最近 IP</th><th>状态</th><th>操作</th></tr>` + rows.String() + `</table></section>`)
-	c.WriteString(`<section><h2>审批请求</h2><table><tr><th>设备</th><th>类型</th><th>对象</th><th>状态</th><th>操作</th></tr>` + reqRows.String() + `</table></section></main>`)
+	c.WriteString(`</section></main>`)
 
 	page := `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ohno 教师端</title>` + uiStyle + `<body>` + c.String() + `</body></html>`
 	h.reply(w, r, 200, []byte(page), "text/html; charset=utf-8", nil)
@@ -751,7 +953,7 @@ func (h *TeacherHandler) handlePost(w http.ResponseWriter, r *http.Request) erro
 		h.replyText(w, r, 404, "Not found")
 		return nil
 	}
-	form, err := parseStrictForm(raw, 20)
+	form, err := parseStrictForm(raw, 30)
 	if err != nil {
 		h.replyText(w, r, 400, "Invalid form")
 		return nil
@@ -762,12 +964,27 @@ func (h *TeacherHandler) handlePost(w http.ResponseWriter, r *http.Request) erro
 		}
 		return ""
 	}
+	hasField := func(key string) bool {
+		_, ok := form[key]
+		return ok
+	}
 	if subtle.ConstantTimeCompare([]byte(h.controlCSRF), []byte(one("csrf"))) != 1 {
 		h.replyText(w, r, 403, "Invalid CSRF token")
 		return nil
 	}
 
 	switch path {
+	case "/regenerate-certificate":
+		if h.regenerateCertFn == nil {
+			h.replyText(w, r, 503, "Certificate regeneration unavailable")
+			return nil
+		}
+		if err := h.regenerateCertFn(); err != nil {
+			h.replyText(w, r, 500, "Failed to regenerate teacher certificate")
+			return nil
+		}
+		h.redirect(w, r, "/")
+		return nil
 	case "/updates/initialize":
 		if err := store.InitializeReleases(); err != nil {
 			return err
@@ -837,21 +1054,67 @@ func (h *TeacherHandler) handlePost(w http.ResponseWriter, r *http.Request) erro
 	defer store.mu.Unlock()
 	switch path {
 	case "/policy":
+		webMode := store.Data.WebMode
+		if hasField("web_mode") {
+			webMode = strings.TrimSpace(one("web_mode"))
+			if !ValidPolicyMode(webMode) {
+				h.replyText(w, r, 400, "Invalid web policy mode")
+				return nil
+			}
+		}
+		programMode := store.Data.ProgramMode
+		if hasField("program_mode") {
+			programMode = strings.TrimSpace(one("program_mode"))
+			if !ValidPolicyMode(programMode) {
+				h.replyText(w, r, 400, "Invalid program policy mode")
+				return nil
+			}
+		}
+
 		domains := uniqueSortedLines(one("domains"))
 		hashes := uniqueSortedLines(one("hashes"))
 		names := uniqueSortedLines(one("names"))
+		allowDomains := store.Data.AllowWebDomains
+		if hasField("allow_domains") {
+			allowDomains = uniqueSortedLines(one("allow_domains"))
+		}
+		features := store.Data.ProgramFeatures
+		if hasField("features") {
+			features = uniqueSortedLines(one("features"))
+		}
+		allowHashes := store.Data.AllowProgramHashes
+		if hasField("allow_hashes") {
+			allowHashes = uniqueSortedLines(one("allow_hashes"))
+		}
+		allowNames := store.Data.AllowProgramNames
+		if hasField("allow_names") {
+			allowNames = uniqueSortedLines(one("allow_names"))
+		}
+		allowFeatures := store.Data.AllowProgramFeatures
+		if hasField("allow_features") {
+			allowFeatures = uniqueSortedLines(one("allow_features"))
+		}
+
 		blockLocal := one("block_local_files") == "1"
 		extraDomain := 0
 		if blockLocal {
 			extraDomain = 1
 		}
-		if len(domains)+extraDomain > 1000 || len(hashes) > 1000 || len(names) > 1000 {
-			h.replyText(w, r, 400, "Invalid domains or SHA-256 values")
+		if len(domains)+extraDomain > 1000 || len(allowDomains) > 950 ||
+			len(hashes) > 1000 || len(names) > 1000 || len(features) > 1000 ||
+			len(allowHashes) > 1000 || len(allowNames) > 1000 || len(allowFeatures) > 1000 {
+			h.replyText(w, r, 400, "Too many policy entries")
 			return nil
 		}
 		for _, d := range domains {
 			if !isValidHostname(d) {
 				h.replyText(w, r, 400, "Invalid domains or SHA-256 values")
+				return nil
+			}
+		}
+		for _, d := range allowDomains {
+			if !isValidHostname(d) {
+				h.replyText(w, r, 400, "Invalid allowlist domain")
 				return nil
 			}
 		}
@@ -861,15 +1124,46 @@ func (h *TeacherHandler) handlePost(w http.ResponseWriter, r *http.Request) erro
 				return nil
 			}
 		}
+		for _, hv := range allowHashes {
+			if !HashRegexp.MatchString(hv) {
+				h.replyText(w, r, 400, "Invalid allowlist SHA-256")
+				return nil
+			}
+		}
 		for _, n := range names {
 			if !ProgramNameRegexp.MatchString(n) {
 				h.replyText(w, r, 400, "Invalid domains or SHA-256 values")
 				return nil
 			}
 		}
+		for _, n := range allowNames {
+			if !ProgramNameRegexp.MatchString(n) {
+				h.replyText(w, r, 400, "Invalid allowlist program name")
+				return nil
+			}
+		}
+		for _, f := range features {
+			if !ValidFeatureRule(f) {
+				h.replyText(w, r, 400, "Invalid program feature rule")
+				return nil
+			}
+		}
+		for _, f := range allowFeatures {
+			if !ValidFeatureRule(f) {
+				h.replyText(w, r, 400, "Invalid allowlist program feature rule")
+				return nil
+			}
+		}
+		store.Data.WebMode = webMode
 		store.Data.WebDomains = domains
+		store.Data.AllowWebDomains = allowDomains
+		store.Data.ProgramMode = programMode
 		store.Data.ProgramHashes = hashes
 		store.Data.ProgramNames = names
+		store.Data.ProgramFeatures = features
+		store.Data.AllowProgramHashes = allowHashes
+		store.Data.AllowProgramNames = allowNames
+		store.Data.AllowProgramFeatures = allowFeatures
 		store.Data.BlockLocalFiles = blockLocal
 		store.Data.PolicyRevision++
 	case "/device":
@@ -918,14 +1212,55 @@ func (h *TeacherHandler) handlePost(w http.ResponseWriter, r *http.Request) erro
 				break
 			}
 		}
-		if target == nil || target.State != "pending" || (action != "approve" && action != "deny") {
+		if target == nil || target.State != "pending" || (action != "approve" && action != "deny" && action != "whitelist") {
 			h.replyText(w, r, 400, "Invalid request")
 			return nil
 		}
-		if action == "approve" {
+		switch action {
+		case "approve":
 			target.State = "approved"
 			target.Expires = time.Now().Unix() + 3600
-		} else {
+		case "whitelist":
+			if target.Kind == "website" && isValidHostname(target.Object) {
+				exists := false
+				for _, d := range store.Data.AllowWebDomains {
+					if d == target.Object {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					if len(store.Data.AllowWebDomains) >= 950 {
+						h.replyText(w, r, 400, "Website allowlist is full")
+						return nil
+					}
+					store.Data.AllowWebDomains = append(store.Data.AllowWebDomains, target.Object)
+					sort.Strings(store.Data.AllowWebDomains)
+				}
+			} else if target.Kind == "application" && HashRegexp.MatchString(target.Object) {
+				exists := false
+				for _, hv := range store.Data.AllowProgramHashes {
+					if hv == target.Object {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					if len(store.Data.AllowProgramHashes) >= 1000 {
+						h.replyText(w, r, 400, "Program allowlist is full")
+						return nil
+					}
+					store.Data.AllowProgramHashes = append(store.Data.AllowProgramHashes, target.Object)
+					sort.Strings(store.Data.AllowProgramHashes)
+				}
+			} else {
+				h.replyText(w, r, 400, "Cannot whitelist this request type")
+				return nil
+			}
+			target.State = "approved"
+			target.Expires = time.Now().Unix() + 3600
+			store.Data.PolicyRevision++
+		default:
 			target.State = "denied"
 		}
 	default:
@@ -1021,12 +1356,19 @@ func (h *TeacherHandler) devicePolicy(w http.ResponseWriter, r *http.Request, da
 		}
 	}
 	h.jsonReply(w, r, 200, map[string]any{
-		"revision":          store.Data.PolicyRevision,
-		"web_domains":       store.Data.WebDomains,
-		"program_hashes":    store.Data.ProgramHashes,
-		"program_names":     store.Data.ProgramNames,
-		"block_local_files": store.Data.BlockLocalFiles,
-		"grants":            grants,
+		"revision":               store.Data.PolicyRevision,
+		"web_mode":               store.Data.WebMode,
+		"web_domains":            store.Data.WebDomains,
+		"allow_web_domains":      store.Data.AllowWebDomains,
+		"program_mode":           store.Data.ProgramMode,
+		"program_hashes":         store.Data.ProgramHashes,
+		"program_names":          store.Data.ProgramNames,
+		"program_features":       store.Data.ProgramFeatures,
+		"allow_program_hashes":   store.Data.AllowProgramHashes,
+		"allow_program_names":    store.Data.AllowProgramNames,
+		"allow_program_features": store.Data.AllowProgramFeatures,
+		"block_local_files":      store.Data.BlockLocalFiles,
+		"grants":                 grants,
 	})
 }
 
@@ -1449,9 +1791,25 @@ func ServeTeacher(opts ServeOptions) error {
 	if err != nil {
 		return err
 	}
+
+	var certMu sync.RWMutex
+	liveCert := cert
+	liveCertPEM := append([]byte{}, certPEM...)
+	getPublicCert := func() []byte {
+		certMu.RLock()
+		out := append([]byte{}, liveCertPEM...)
+		certMu.RUnlock()
+		return out
+	}
+
 	tlsCfg := &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			certMu.RLock()
+			cp := liveCert
+			certMu.RUnlock()
+			return &cp, nil
+		},
 	}
 
 	apiAddr := net.JoinHostPort(opts.Bind, strconv.Itoa(opts.Port))
@@ -1483,20 +1841,58 @@ func ServeTeacher(opts ServeOptions) error {
 		}
 	}
 
+	certHost := "localhost"
+	if rawHost, hErr := os.Hostname(); hErr == nil {
+		candidate := strings.ToLower(strings.SplitN(rawHost, ".", 2)[0])
+		if isValidHostname(candidate) {
+			certHost = candidate
+		}
+	}
+	if opts.EnrollmentHost != "" && certHost == "localhost" {
+		certHost = opts.EnrollmentHost
+	}
+	regenerateCert := func() error {
+		ips := DetectLANIPs()
+		if opts.EnrollmentHost != "" {
+			if addr, pErr := netip.ParseAddr(opts.EnrollmentHost); pErr == nil && addr.Zone() == "" {
+				ips = append(ips, addr.String())
+			}
+		}
+		newCertPEM, newKeyPEM, rErr := RegenerateCertificate(opts.CertPath, opts.KeyPath, certHost, ips)
+		if rErr != nil {
+			return rErr
+		}
+		pair, pErr := tls.X509KeyPair(newCertPEM, newKeyPEM)
+		if pErr != nil {
+			return pErr
+		}
+		certMu.Lock()
+		liveCert = pair
+		liveCertPEM = newCertPEM
+		certMu.Unlock()
+		return nil
+	}
+
+	lanIPs := DetectLANIPs()
 	apiHandler := NewTeacherHandler(ServerConfig{
-		Store:           store,
-		Control:         false,
-		TraceUpdateHTTP: opts.TraceUpdateHTTP,
+		Store:               store,
+		Control:             false,
+		APIPort:             apiPort,
+		PublicCertificateFn: getPublicCert,
+		TraceUpdateHTTP:     opts.TraceUpdateHTTP,
 	})
 	ctrlHandler := NewTeacherHandler(ServerConfig{
-		Store:             store,
-		Control:           true,
-		ControlCSRF:       tokenURLSafe(32),
-		SchoolInstaller:   embeddedBytes,
-		SchoolInstallerFn: diskFn,
-		EnrollmentOrigin:  origin,
-		PublicCertificate: certPEM,
-		TraceUpdateHTTP:   opts.TraceUpdateHTTP,
+		Store:               store,
+		Control:             true,
+		ControlCSRF:         tokenURLSafe(32),
+		SchoolInstaller:     embeddedBytes,
+		SchoolInstallerFn:   diskFn,
+		EnrollmentOrigin:    origin,
+		APIPort:             apiPort,
+		LANIPs:              lanIPs,
+		PublicCertificateFn: getPublicCert,
+		RegenerateCertFn:    regenerateCert,
+		TraceUpdateHTTP:     opts.TraceUpdateHTTP,
 	})
 
 	apiSrv := &http.Server{
@@ -1515,6 +1911,9 @@ func ServeTeacher(opts ServeOptions) error {
 	go func() { errCh <- ctrlSrv.Serve(ctrlListener) }()
 
 	fmt.Printf("ohno student API listening on https://%s:%d\n", opts.Bind, apiPort)
+	if len(lanIPs) > 0 {
+		fmt.Printf("ohno LAN address: https://%s:%d (fingerprint %s)\n", lanIPs[0], apiPort, CertificateFingerprint(getPublicCert()))
+	}
 	fmt.Printf("ohno teacher control listening on http://127.0.0.1:%d\n", ctrlPort)
 	if opts.OpenBrowser {
 		openBrowserURL("http://127.0.0.1:" + strconv.Itoa(ctrlPort) + "/")
@@ -1559,18 +1958,22 @@ func EasyStart() error {
 	certPath := filepath.Join(home, "teacher-cert.pem")
 	keyPath := filepath.Join(home, "teacher-key.pem")
 
-	rawHost, err := os.Hostname()
-	if err != nil {
-		return err
+	lanIPs := DetectLANIPs()
+	certHost := "localhost"
+	if rawHost, err := os.Hostname(); err == nil {
+		candidate := strings.ToLower(strings.SplitN(rawHost, ".", 2)[0])
+		if isValidHostname(candidate) {
+			certHost = candidate
+		}
 	}
-	hostname := strings.ToLower(strings.SplitN(rawHost, ".", 2)[0])
-	if !isValidHostname(hostname) {
-		return errors.New("computer hostname is not suitable for teacher HTTPS certificate")
+	if certHost == "localhost" && len(lanIPs) > 0 {
+		certHost = lanIPs[0]
 	}
+
 	_, certErr := os.Stat(certPath)
 	_, keyErr := os.Stat(keyPath)
 	if os.IsNotExist(certErr) && os.IsNotExist(keyErr) {
-		if err := CreateCertificate(certPath, keyPath, hostname); err != nil {
+		if err := CreateCertificateWithIPs(certPath, keyPath, certHost, lanIPs); err != nil {
 			return err
 		}
 	} else if certErr != nil || keyErr != nil {
@@ -1581,7 +1984,13 @@ func EasyStart() error {
 		if err != nil {
 			return err
 		}
+		_ = st.InitializeReleases()
 		st.Close()
+	}
+
+	enrollmentHost := certHost
+	if len(lanIPs) > 0 {
+		enrollmentHost = lanIPs[0]
 	}
 	return ServeTeacher(ServeOptions{
 		StatePath:      statePath,
@@ -1590,7 +1999,7 @@ func EasyStart() error {
 		Bind:           "0.0.0.0",
 		Port:           8443,
 		ControlPort:    8765,
-		EnrollmentHost: hostname,
+		EnrollmentHost: enrollmentHost,
 		OpenBrowser:    true,
 	})
 }

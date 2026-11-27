@@ -332,4 +332,169 @@ TrustedHttpResponse trusted_post(const TrustedPost& input,
     } catch(...) {return failure(TrustedHttpFailure::InvalidResponse);}
 }
 
+std::wstring normalize_teacher_origin(const std::wstring& input) {
+    std::wstring s = input;
+    while (!s.empty() && (s.front() == L' ' || s.front() == L'\t' || s.front() == L'\r' || s.front() == L'\n')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\t' || s.back() == L'\r' || s.back() == L'\n' || s.back() == L'/')) s.pop_back();
+    if (s.empty() || s.size() > 512) return {};
+    if (s.rfind(L"http://", 0) == 0) return {}; // never downgrade to plaintext HTTP
+    if (s.rfind(L"https://", 0) != 0) {
+        // Bare IPv6 literal without brackets (contains more than one ':' and no '[')
+        const auto first_colon = s.find(L':');
+        const auto last_colon = s.rfind(L':');
+        if (first_colon != std::wstring::npos && first_colon != last_colon && s.front() != L'[') {
+            s = L"[" + s + L"]:8443";
+        } else if (s.front() == L'[') {
+            const auto close = s.find(L']');
+            if (close == std::wstring::npos) return {};
+            if (close + 1 == s.size()) s += L":8443";
+        } else if (first_colon == std::wstring::npos) {
+            s += L":8443";
+        }
+        s = L"https://" + s;
+    } else {
+        // Ensure explicit port if omitted, e.g. https://10.181.203.70
+        std::wstring host_part = s.substr(8);
+        if (host_part.empty() || host_part.find_first_of(L"/?#@\\") != std::wstring::npos) return {};
+        if (host_part.front() == L'[') {
+            const auto close = host_part.find(L']');
+            if (close == std::wstring::npos) return {};
+            if (close + 1 == host_part.size()) s += L":8443";
+        } else if (host_part.find(L':') == std::wstring::npos) {
+            s += L":8443";
+        }
+    }
+    std::wstring host;
+    INTERNET_PORT port = 0;
+    return parse_origin(s, host, port) ? s : std::wstring{};
+}
+
+static std::wstring der_fingerprint(const BYTE* der, DWORD len) {
+    BYTE digest[32]{};
+    DWORD digest_len = sizeof(digest);
+    if (!der || !len || !CryptHashCertificate2(L"SHA256", 0, nullptr, der, len, digest, &digest_len) || digest_len != 32)
+        return {};
+    constexpr wchar_t hex[] = L"0123456789ABCDEF";
+    std::wstring out;
+    for (int i = 0; i < 8; ++i) {
+        if (i > 0 && i % 2 == 0) out += L'-';
+        out += hex[digest[i] >> 4];
+        out += hex[digest[i] & 15];
+    }
+    return out;
+}
+
+std::wstring pem_certificate_fingerprint(const std::string& pem) {
+    certificate cert;
+    if (!parse_pin(pem, cert) || !cert.value) return {};
+    return der_fingerprint(cert.value->pbCertEncoded, cert.value->cbCertEncoded);
+}
+
+TeacherBootstrapInfo probe_teacher_bootstrap(const std::wstring& server_input) noexcept {
+    TeacherBootstrapInfo info;
+    try {
+        info.normalized_server = normalize_teacher_origin(server_input);
+        std::wstring host;
+        INTERNET_PORT port = 0;
+        if (info.normalized_server.empty() || !parse_origin(info.normalized_server, host, port)) {
+            info.status = ProbeResult::InvalidServer;
+            return info;
+        }
+        http_handle session(WinHttpOpen(L"ohno-setup/1", WINHTTP_ACCESS_TYPE_NO_PROXY,
+            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+        if (!session.value || !WinHttpSetTimeouts(session.value, 4000, 4000, 4000, 4000) ||
+            !set_dword(session.value, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2) ||
+            !set_dword(session.value, WINHTTP_OPTION_CONNECT_RETRIES, 2) ||
+            !set_dword(session.value, WINHTTP_OPTION_MAX_RESPONSE_HEADER_SIZE, 8192))
+            return info;
+        http_handle connection(WinHttpConnect(session.value, host.c_str(), port, 0));
+        if (!connection.value) return info;
+        const wchar_t* accept[] = {L"application/json", nullptr};
+        http_handle request(WinHttpOpenRequest(connection.value, L"GET", L"/api/bootstrap",
+            L"HTTP/1.1", WINHTTP_NO_REFERER, accept, WINHTTP_FLAG_SECURE));
+        if (!request.value ||
+            !set_dword(request.value, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_DISABLE_REDIRECTS |
+                WINHTTP_DISABLE_AUTHENTICATION | WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_KEEP_ALIVE) ||
+            !set_dword(request.value, WINHTTP_OPTION_SECURITY_FLAGS, SECURITY_FLAG_IGNORE_UNKNOWN_CA))
+            return info;
+        if (!WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpReceiveResponse(request.value, nullptr)) {
+            const DWORD err = GetLastError();
+            if (err == ERROR_WINHTTP_SECURE_CERT_CN_INVALID) info.status = ProbeResult::CertHostMismatch;
+            else if (err == ERROR_WINHTTP_SECURE_CERT_DATE_INVALID) info.status = ProbeResult::CertExpired;
+            else info.status = ProbeResult::Unreachable;
+            return info;
+        }
+        // Extract the actual negotiated TLS leaf certificate (never trusting an unsigned body copy).
+        PCCERT_CONTEXT raw_cert = nullptr;
+        DWORD cert_size = sizeof(raw_cert);
+        if (!WinHttpQueryOption(request.value, WINHTTP_OPTION_SERVER_CERT_CONTEXT, &raw_cert, &cert_size) || !raw_cert) {
+            info.status = ProbeResult::InvalidResponse;
+            return info;
+        }
+        certificate leaf;
+        leaf.value = raw_cert;
+        DWORD pem_len = 0;
+        if (!CryptBinaryToStringA(leaf.value->pbCertEncoded, leaf.value->cbCertEncoded,
+                                  CRYPT_STRING_BASE64HEADER, nullptr, &pem_len) || pem_len < 100 || pem_len > 16384) {
+            info.status = ProbeResult::InvalidResponse;
+            return info;
+        }
+        info.certificate_pem.resize(pem_len);
+        if (!CryptBinaryToStringA(leaf.value->pbCertEncoded, leaf.value->cbCertEncoded,
+                                  CRYPT_STRING_BASE64HEADER, info.certificate_pem.data(), &pem_len)) {
+            info.status = ProbeResult::InvalidResponse;
+            return info;
+        }
+        info.certificate_pem.resize(pem_len);
+        if (!info.certificate_pem.empty() && info.certificate_pem.back() == '\0') info.certificate_pem.pop_back();
+        info.fingerprint = der_fingerprint(leaf.value->pbCertEncoded, leaf.value->cbCertEncoded);
+        if (info.fingerprint.empty()) {
+            info.status = ProbeResult::InvalidResponse;
+            return info;
+        }
+
+        DWORD status_code = 0, code_size = sizeof(status_code);
+        if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &code_size, WINHTTP_NO_HEADER_INDEX) || status_code != 200) {
+            info.status = ProbeResult::InvalidResponse;
+            return info;
+        }
+        std::string body;
+        body.reserve(4096);
+        for (;;) {
+            char buf[2048]{};
+            DWORD got = 0;
+            if (!WinHttpReadData(request.value, buf, sizeof(buf), &got)) break;
+            if (got == 0) break;
+            if (body.size() + got > 8192) {
+                info.status = ProbeResult::InvalidResponse;
+                return info;
+            }
+            body.append(buf, got);
+        }
+        const auto doc = ohno_json::parse(body);
+        if (doc.type != ohno_json::value::kind::object) {
+            info.status = ProbeResult::InvalidResponse;
+            return info;
+        }
+        auto it_m = doc.fields.find("maintenance_configured");
+        if (it_m != doc.fields.end() && it_m->second.type == ohno_json::value::kind::boolean) {
+            info.maintenance_configured = it_m->second.boolean;
+        }
+        auto it_k = doc.fields.find("release_public_key");
+        if (it_k != doc.fields.end() && it_k->second.type == ohno_json::value::kind::string) {
+            const auto& k = it_k->second.text;
+            if (k.size() == 130 && k.rfind("04", 0) == 0 && lower_hex(k, 130)) {
+                info.release_public_key = k;
+            }
+        }
+        info.status = ProbeResult::Ok;
+        return info;
+    } catch (...) {
+        info.status = ProbeResult::InvalidResponse;
+        return info;
+    }
+}
+
 }

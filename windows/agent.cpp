@@ -204,7 +204,8 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool
     };
     RequestPipe website_requests(stop_event,on_request);
     TunManager tun(stop_event);
-    std::vector<std::string> tun_blocked,tun_allowed;
+    std::vector<std::string> tun_domains,tun_allowed;
+    bool tun_whitelist=false;
     try{
         get_identity();auto cached=cached_policy();
         // Temporary exceptions cannot survive a restart without online approval.
@@ -212,8 +213,11 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool
         if(!clear_edge_allow_policy())debug(L"ohno: cannot clear cached Edge exceptions\n");
         if(!cached.empty()){
             auto p=ohno::parse_client_policy(ohno_json::parse(cached));
-            tun_blocked=ohno::effective_policy(p,static_cast<std::int64_t>(std::time(nullptr)),false).domains;
-            if(!apply_edge_policy(tun_blocked))debug(L"ohno: cached Edge policy update failed\n");
+            auto active=ohno::effective_policy(p,static_cast<std::int64_t>(std::time(nullptr)),false);
+            tun_whitelist=active.web_mode==ohno::PolicyMode::Whitelist;
+            tun_domains=active.tun_domains;
+            if(!apply_edge_policy(active.domains))debug(L"ohno: cached Edge policy update failed\n");
+            if(tun_whitelist&&!apply_edge_allow_policy(active.allowed_sites))debug(L"ohno: cached Edge allow policy update failed\n");
         }
     }catch(const std::exception&){debug(L"ohno: cached TUN policy unavailable\n");}
     NetworkFilter network;
@@ -222,7 +226,7 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool
     ohno::ApprovalQueue queued;
     while(WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
         network.begin_cycle();
-        bool tun_ok=tun.ensure(tun_blocked,tun_allowed);
+        bool tun_ok=tun.ensure(tun_domains,tun_allowed,tun_whitelist);
         bool cycle_ok=tun_ok&&network.available();
         try{
             auto server=get_server();if(server.empty())throw std::runtime_error("server URL not configured");
@@ -254,19 +258,18 @@ void run_agent(HANDLE stop_event,const std::function<void()>& healthy_cycle,bool
                 auto p=ohno::parse_client_policy(ohno_json::parse(policy_text));
                 auto active=ohno::effective_policy(p,static_cast<std::int64_t>(std::time(nullptr)),online);
                 const auto& domains=active.domains;
-                const auto& names=active.names;
-                const auto& blocked=active.hashes;
-                const auto& allowed=active.allowed_programs;
                 const auto& network_allowed=active.allowed_network;
                 const auto& site_allowed=active.allowed_sites;
                 bool paused=active.paused;
-                tun_blocked=domains;tun_allowed=site_allowed;
-                if(!tun.ensure(tun_blocked,tun_allowed)){cycle_ok=false;debug(L"ohno: TUN unavailable or restarting\n");}
+                tun_whitelist=active.web_mode==ohno::PolicyMode::Whitelist;
+                tun_domains=active.tun_domains;
+                tun_allowed=site_allowed;
+                if(!tun.ensure(tun_domains,tun_allowed,tun_whitelist)){cycle_ok=false;debug(L"ohno: TUN unavailable or restarting\n");}
                 if(!apply_edge_policy(domains)){cycle_ok=false;debug(L"ohno: Edge policy update failed\n");}
                 if(!apply_edge_allow_policy(site_allowed)){cycle_ok=false;debug(L"ohno: Edge allow policy update failed\n");}
                 network.apply_grants(network_allowed);
                 network.set_paused(paused);
-                if(!paused)for(const auto& app:stop_matching_processes(blocked,names,allowed,0,stop_event)){
+                if(!paused)for(const auto& app:stop_matching_processes(active.process_rules(),0,stop_event)){
                     auto now=GetTickCount64();auto it=last_request.find(app.hash);
                     if(it==last_request.end()||now-it->second>=60000){last_request[app.hash]=now;queued.enqueue("application",app.hash,app.name);}
                 }

@@ -4,12 +4,12 @@
 
 管理面与学生 API 严格分离：
 
-- **本机管理**：`http://127.0.0.1:8765`，仅监听 loopback 并校验 `Host` 头，无登录密码，使用随机 CSRF token 防止跨站提交。
-- **学生 API**：`https://<teacher-host>:8443`，局域网可达，仅提供设备注册、策略、申请、可选 PIN 解锁、维护授权与托管升级 API，不暴露管理页面。
+- **本机管理**：`http://127.0.0.1:8765`，仅监听 loopback 并校验 `Host` 头，无登录密码，使用随机 CSRF token 防止跨站提交；支持一键重新签发含当前局域网 IP 的证书、按 IP 导出学校专属安装包、配置网站/程序黑名单与白名单及特征规则、以及一键将审批请求加入永久白名单。
+- **学生 API**：`https://<teacher-ip>:8443`，局域网可达，仅提供无敏感信息的 `/api/bootstrap` 证书指纹引导、设备注册、策略、申请、可选 PIN 解锁、维护授权与托管升级 API，不暴露管理页面。
 
 ## 直接运行
 
-Windows 发行版 `ohno-teacher.exe` 已内嵌 `ohno-setup.exe` 与 `update_ui.js`，双击即可自动在 `%LOCALAPPDATA%\OhnoTeacher` 初始化证书和 `state.json` 并打开浏览器管理页。
+Windows 发行版 `ohno-teacher.exe` 已内嵌 `ohno-setup.exe` 与 `update_ui.js`，双击即可自动检测局域网 IPv4、在 `%LOCALAPPDATA%\OhnoTeacher` 初始化含局域网 IP SAN 的证书、`state.json` 与本校发布信任，并打开浏览器管理页。
 
 命令行显式运行（Windows / Linux 通用）：
 

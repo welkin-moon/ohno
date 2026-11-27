@@ -25,7 +25,7 @@ std::wstring ascii(const std::string& s){return std::wstring(s.begin(),s.end());
 bool apply_browser_policy_at(HKEY root,const std::wstring& target,const std::wstring& tracker,const std::vector<std::string>& domains){
     if(domains.size()>1000)return false;
     std::set<std::wstring> wanted;
-    for(const auto& d:domains){if(d!="file://*"&&!ohno::valid_hostname(d)&&!(d.size()>1&&d[0]=='.'&&ohno::valid_hostname(d.substr(1))))return false;wanted.insert(ascii(d));}
+    for(const auto& d:domains){if(d!="*"&&d!="file://*"&&!ohno::valid_hostname(d)&&!(d.size()>1&&d[0]=='.'&&ohno::valid_hostname(d.substr(1))))return false;wanted.insert(ascii(d));}
     key p,t;if(!open_or_create(root,target,p)||!open_or_create(root,tracker,t))return false;
     bool ok=true;auto current=values(p.h,ok);auto owned=values(t.h,ok);if(!ok)return false;
     for(const auto& item:owned){

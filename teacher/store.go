@@ -25,7 +25,7 @@ const (
 
 var (
 	MACRegexp         = regexp.MustCompile(`^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$`)
-	ProgramNameRegexp = regexp.MustCompile(`^[a-z0-9_. -]{1,128}\.exe$`)
+	ProgramNameRegexp = regexp.MustCompile(`^[a-z0-9_. +-]{1,128}\.exe$`)
 	PINRegexp         = regexp.MustCompile(`^[0-9]{4,8}$`)
 
 	DefaultWebDomains = []string{"classic.minecraft.net", "eaglercraft.com"}
@@ -33,6 +33,35 @@ var (
 		"plantsvszombies.exe", "plantsvszombiesoriginal.exe", "slaythespire.exe",
 		"gta3.exe", "gta-vc.exe", "gta_sa.exe", "gtaiv.exe",
 		"minecraftlauncher.exe", "minecraft.windows.exe",
+	}
+	DefaultProgramFeatures = []string{
+		"orig:plantsvszombies.exe",
+		"orig:minecraftlauncher.exe",
+		"orig:steam.exe",
+		"orig:wegame.exe",
+		"product:minecraft",
+		"product:plants vs. zombies",
+		"product:steam",
+		"product:wegame",
+		"company:valve",
+		"company:epic games",
+		"company:riot games",
+		"company:mihoyo",
+		"company:rockstar",
+		"company:popcap",
+		"title:minecraft",
+		"title:植物大战僵尸",
+		"path:steamapps",
+	}
+	DefaultAllowProgramNames = []string{
+		"msedge.exe", "chrome.exe", "firefox.exe",
+		"winword.exe", "excel.exe", "powerpnt.exe",
+		"wps.exe", "et.exe", "wpp.exe",
+		"code.exe", "devcpp.exe", "notepad++.exe", "python.exe",
+	}
+	DefaultAllowProgramFeatures = []string{
+		"signer:microsoft corporation",
+		"company:kingsoft",
 	}
 )
 
@@ -98,14 +127,54 @@ type StateData struct {
 	UnlockPINSalt         *string                  `json:"unlock_pin_salt"`
 	UnlockPINHash         *string                  `json:"unlock_pin_hash"`
 	PolicyRevision        int                      `json:"policy_revision"`
+	WebMode               string                   `json:"web_mode"`
 	WebDomains            []string                 `json:"web_domains"`
+	AllowWebDomains       []string                 `json:"allow_web_domains"`
+	ProgramMode           string                   `json:"program_mode"`
 	ProgramHashes         []string                 `json:"program_hashes"`
 	ProgramNames          []string                 `json:"program_names"`
+	ProgramFeatures       []string                 `json:"program_features"`
+	AllowProgramHashes    []string                 `json:"allow_program_hashes"`
+	AllowProgramNames     []string                 `json:"allow_program_names"`
+	AllowProgramFeatures  []string                 `json:"allow_program_features"`
 	BlockLocalFiles       bool                     `json:"block_local_files"`
 	Devices               map[string]*DeviceRecord `json:"devices"`
 	Requests              []*RequestRecord         `json:"requests"`
 	MaintenanceCredential *MaintenanceCredential   `json:"maintenance_credential,omitempty"`
 	MaintenanceEvents     []MaintenanceEvent       `json:"maintenance_events,omitempty"`
+}
+
+// ValidPolicyMode reports whether mode is "blacklist" or "whitelist".
+func ValidPolicyMode(mode string) bool {
+	return mode == "blacklist" || mode == "whitelist"
+}
+
+// ValidFeatureRule matches src/feature_match.hpp valid_feature_rule exactly.
+func ValidFeatureRule(rule string) bool {
+	if len(rule) == 0 || len(rule) > 160 || !utf8.ValidString(rule) {
+		return false
+	}
+	for i := 0; i < len(rule); i++ {
+		if rule[i] < 32 || rule[i] == 127 {
+			return false
+		}
+	}
+	body := rule
+	if colon := strings.IndexByte(rule, ':'); colon >= 0 {
+		prefix := rule[:colon]
+		switch prefix {
+		case "any", "orig", "product", "company", "desc", "signer", "title", "path":
+			body = rule[colon+1:]
+		default:
+			return false
+		}
+	}
+	for i := 0; i < len(body); i++ {
+		if body[i] > 32 {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidText verifies printable UTF-8 text within [min, limit] runes.
@@ -173,14 +242,35 @@ func tokenURLSafe(nBytes int) string {
 }
 
 func normalizeStateData(d *StateData) {
+	if !ValidPolicyMode(d.WebMode) {
+		d.WebMode = "blacklist"
+	}
+	if !ValidPolicyMode(d.ProgramMode) {
+		d.ProgramMode = "blacklist"
+	}
 	if d.WebDomains == nil {
 		d.WebDomains = []string{}
+	}
+	if d.AllowWebDomains == nil {
+		d.AllowWebDomains = []string{}
 	}
 	if d.ProgramHashes == nil {
 		d.ProgramHashes = []string{}
 	}
 	if d.ProgramNames == nil {
 		d.ProgramNames = []string{}
+	}
+	if d.ProgramFeatures == nil {
+		d.ProgramFeatures = []string{}
+	}
+	if d.AllowProgramHashes == nil {
+		d.AllowProgramHashes = []string{}
+	}
+	if d.AllowProgramNames == nil {
+		d.AllowProgramNames = []string{}
+	}
+	if d.AllowProgramFeatures == nil {
+		d.AllowProgramFeatures = []string{}
 	}
 	if d.Devices == nil {
 		d.Devices = map[string]*DeviceRecord{}
@@ -230,16 +320,23 @@ func InitializeStore(path string) (*Store, error) {
 		return nil, err
 	}
 	initial := StateData{
-		Version:         1,
-		UnlockPINSalt:   nil,
-		UnlockPINHash:   nil,
-		PolicyRevision:  0,
-		WebDomains:      append([]string{}, DefaultWebDomains...),
-		ProgramHashes:   []string{},
-		ProgramNames:    append([]string{}, DefaultGameNames...),
-		BlockLocalFiles: false,
-		Devices:         map[string]*DeviceRecord{},
-		Requests:        []*RequestRecord{},
+		Version:              1,
+		UnlockPINSalt:        nil,
+		UnlockPINHash:        nil,
+		PolicyRevision:       0,
+		WebMode:              "blacklist",
+		WebDomains:           append([]string{}, DefaultWebDomains...),
+		AllowWebDomains:      []string{},
+		ProgramMode:          "blacklist",
+		ProgramHashes:        []string{},
+		ProgramNames:         append([]string{}, DefaultGameNames...),
+		ProgramFeatures:      append([]string{}, DefaultProgramFeatures...),
+		AllowProgramHashes:   []string{},
+		AllowProgramNames:    append([]string{}, DefaultAllowProgramNames...),
+		AllowProgramFeatures: append([]string{}, DefaultAllowProgramFeatures...),
+		BlockLocalFiles:      false,
+		Devices:              map[string]*DeviceRecord{},
+		Requests:             []*RequestRecord{},
 	}
 	raw, err := json.Marshal(initial)
 	if err != nil {

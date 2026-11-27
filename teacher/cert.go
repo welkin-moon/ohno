@@ -17,57 +17,55 @@ import (
 	"time"
 )
 
-// CreateCertificate creates a self-signed P-256 HTTPS certificate for the teacher API.
-// Never overwrites existing certificate or key files.
-func CreateCertificate(certPath, keyPath, host string) error {
-	if _, err := os.Stat(certPath); err == nil {
-		return os.ErrExist
-	}
-	if _, err := os.Stat(keyPath); err == nil {
-		return os.ErrExist
-	}
+func buildCertificatePEM(host string, extraIPs []string) (certPEM, keyPEM []byte, err error) {
 	var dnsNames []string
 	var ipAddrs []net.IP
+	addDNS := func(name string) {
+		for _, d := range dnsNames {
+			if d == name {
+				return
+			}
+		}
+		dnsNames = append(dnsNames, name)
+	}
+	addIP := func(ip net.IP) {
+		for _, existing := range ipAddrs {
+			if existing.Equal(ip) {
+				return
+			}
+		}
+		ipAddrs = append(ipAddrs, ip)
+	}
+
 	cn := host
-	if addr, err := netip.ParseAddr(host); err == nil && addr.Zone() == "" {
-		ipAddrs = append(ipAddrs, net.IP(addr.AsSlice()))
+	if addr, parseErr := netip.ParseAddr(host); parseErr == nil && addr.Zone() == "" {
+		addIP(net.IP(addr.AsSlice()))
 		cn = addr.String()
 	} else {
 		lower := strings.ToLower(host)
 		if !isValidHostname(lower) {
-			return errors.New("invalid server hostname")
+			return nil, nil, errors.New("invalid server hostname")
 		}
 		cn = lower
-		dnsNames = append(dnsNames, lower)
+		addDNS(lower)
 	}
-	// Always include localhost and 127.0.0.1 SANs matching teacher/server.py.
-	hasLocalhost := false
-	for _, d := range dnsNames {
-		if d == "localhost" {
-			hasLocalhost = true
+	// Always include localhost, 127.0.0.1, and any detected/configured LAN IPs.
+	addDNS("localhost")
+	addIP(net.IPv4(127, 0, 0, 1))
+	for _, raw := range extraIPs {
+		if addr, parseErr := netip.ParseAddr(strings.TrimSpace(raw)); parseErr == nil && addr.Zone() == "" {
+			addIP(net.IP(addr.AsSlice()))
 		}
-	}
-	if !hasLocalhost {
-		dnsNames = append(dnsNames, "localhost")
-	}
-	hasLoopback := false
-	for _, ip := range ipAddrs {
-		if ip.Equal(net.IPv4(127, 0, 0, 1)) {
-			hasLoopback = true
-		}
-	}
-	if !hasLoopback {
-		ipAddrs = append(ipAddrs, net.IPv4(127, 0, 0, 1))
 	}
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if serial.Sign() == 0 {
 		serial.SetInt64(1)
@@ -89,15 +87,36 @@ func CreateCertificate(certPath, keyPath, host string) error {
 	}
 	derCert, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	derKey, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: derKey})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derCert})
+	return certPEM, keyPEM, nil
+}
+
+// CreateCertificate creates a self-signed P-256 HTTPS certificate for the teacher API.
+// Never overwrites existing certificate or key files.
+func CreateCertificate(certPath, keyPath, host string) error {
+	return CreateCertificateWithIPs(certPath, keyPath, host, nil)
+}
+
+// CreateCertificateWithIPs creates a self-signed P-256 HTTPS certificate including extraIPs in SANs.
+// Never overwrites existing certificate or key files.
+func CreateCertificateWithIPs(certPath, keyPath, host string, extraIPs []string) error {
+	if _, err := os.Stat(certPath); err == nil {
+		return os.ErrExist
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		return os.ErrExist
+	}
+	certPEM, keyPEM, err := buildCertificatePEM(host, extraIPs)
+	if err != nil {
 		return err
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: derKey})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derCert})
-
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
 		return err
 	}
@@ -134,4 +153,65 @@ func CreateCertificate(certPath, keyPath, host string) error {
 		return err
 	}
 	return nil
+}
+
+// RegenerateCertificate atomically replaces the teacher HTTPS certificate and private key
+// with a newly issued pair covering host and extraIPs.
+func RegenerateCertificate(certPath, keyPath, host string, extraIPs []string) ([]byte, []byte, error) {
+	certPEM, keyPEM, err := buildCertificatePEM(host, extraIPs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
+		return nil, nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o755); err != nil {
+		return nil, nil, err
+	}
+	writeTemp := func(target string, data []byte, perm os.FileMode) (string, error) {
+		f, err := os.CreateTemp(filepath.Dir(target), ".ohno-cert-*")
+		if err != nil {
+			return "", err
+		}
+		tmp := f.Name()
+		if err := f.Chmod(perm); err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return "", err
+		}
+		if _, err := f.Write(data); err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return "", err
+		}
+		if err := syncFile(f); err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(tmp)
+			return "", err
+		}
+		return tmp, nil
+	}
+	tmpKey, err := writeTemp(keyPath, keyPEM, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpCert, err := writeTemp(certPath, certPEM, 0o644)
+	if err != nil {
+		_ = os.Remove(tmpKey)
+		return nil, nil, err
+	}
+	if err := os.Rename(tmpKey, keyPath); err != nil {
+		_ = os.Remove(tmpKey)
+		_ = os.Remove(tmpCert)
+		return nil, nil, err
+	}
+	if err := os.Rename(tmpCert, certPath); err != nil {
+		_ = os.Remove(tmpCert)
+		return nil, nil, err
+	}
+	return certPEM, keyPEM, nil
 }

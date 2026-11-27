@@ -6,6 +6,15 @@ int main(){
  auto p=ohno_json::parse(ohno::tun_config({"game.example","file://*"},{".allowed.game.example"}));
  auto& in=p.at("inbounds").items[0];assert(in.at("type").text=="tun");assert(in.at("auto_route").boolean);
  auto& rules=p.at("route").at("rules").items;assert(rules.size()==3);assert(rules[1].at("domain").items[0].text=="allowed.game.example");assert(rules[2].at("domain_suffix").items[0].text=="game.example");
+
+ auto pw=ohno_json::parse(ohno::tun_config_mode(true,{"edu.cn","school.lan"},{".extra.example"}));
+ auto& wrules=pw.at("route").at("rules").items;
+ assert(wrules.size()==5);
+ assert(wrules[1].at("port").text=="53");
+ assert(wrules[2].at("domain_suffix").items[0].text=="edu.cn");
+ assert(wrules[3].at("domain").items[0].text=="extra.example");
+ assert(wrules[4].at("action").text=="reject");
+
  bool bad=false;try{ohno::tun_config({"bad domain"},{});}catch(const std::runtime_error&){bad=true;}assert(bad);
  std::cout<<"TUN configuration tests passed\n";
 }

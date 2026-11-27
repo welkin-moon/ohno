@@ -28,8 +28,10 @@ mac-identity-test: tests/mac_identity_test.cpp src/mac_identity.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/mac_identity_test.cpp -o $@
 setup-bundle-test: tests/setup_bundle_test.cpp windows/setup_bundle.hpp
 	$(CXX) $(CXXFLAGS) tests/setup_bundle_test.cpp -o $@
-client-policy-test: tests/client_policy_test.cpp src/client_policy.hpp src/json.hpp src/policy.cpp src/policy.hpp
+client-policy-test: tests/client_policy_test.cpp src/client_policy.hpp src/feature_match.hpp src/json.hpp src/policy.cpp src/policy.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/client_policy_test.cpp src/policy.cpp -o $@
+feature-match-test: tests/feature_match_test.cpp src/feature_match.hpp
+	$(CXX) $(CXXFLAGS) -Isrc tests/feature_match_test.cpp -o $@
 approval-queue-test: tests/approval_queue_test.cpp src/approval_queue.hpp src/json.hpp src/policy.cpp src/policy.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/approval_queue_test.cpp src/policy.cpp -o $@
 update-manifest-test: tests/update_manifest_test.cpp src/update_manifest.hpp src/json.hpp
@@ -44,7 +46,7 @@ update-health-test: tests/update_health_test.cpp src/update_health.hpp src/agent
 check-no-python:
 	@if [ -n "$$(find . -name '*.py' -not -path './.git/*')" ]; then echo "Python files are forbidden in this repository" >&2; exit 1; fi
 
-test-cpp: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test
+test-cpp: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test feature-match-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test
 	./policy-test
 	./json-test
 	./smbios-test
@@ -52,6 +54,7 @@ test-cpp: policy-test json-test smbios-test tun-config-test mac-identity-test se
 	./mac-identity-test
 	./setup-bundle-test
 	./client-policy-test
+	./feature-match-test
 	./approval-queue-test
 	./update-manifest-test
 	./update-transaction-test
@@ -70,4 +73,4 @@ test-js:
 test: check-no-python test-cpp test-go test-parity test-js
 
 clean:
-	rm -f ohno-sim ohno-teacher ohno-pkg policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test
+	rm -f ohno-sim ohno-teacher ohno-pkg policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test feature-match-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test

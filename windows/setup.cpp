@@ -26,7 +26,7 @@
 #pragma comment(lib,"bcrypt.lib")
 namespace {
 #ifndef OHNO_VERSION_WIDE
-#define OHNO_VERSION_WIDE L"1.0.0"
+#define OHNO_VERSION_WIDE L"1.1.0"
 #endif
 constexpr wchar_t service_name[]=L"Ohno";
 constexpr wchar_t legacy_service_name[]=L"OhnoPrototype";
@@ -127,23 +127,40 @@ bool get_password(const std::wstring& server,bool uninstall,std::string& output)
     if(length<=0||length>512)return false;output.resize(static_cast<std::size_t>(length));
     return WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,entered.value.data(),static_cast<int>(entered.value.size()),output.data(),length,nullptr,nullptr)!=0;
 }
-bool authorize(const std::wstring& server,const std::string& pem,bool uninstall){
+std::wstring last_error_detail;
+bool authorize(const std::wstring& server,const std::string& pem,bool uninstall,const std::wstring* supplied_password=nullptr){
+    last_error_detail.clear();
     ohno::MaintenanceRequest request;request.server=server;request.certificate_pem=pem;request.action=uninstall?"uninstall":"install";
     // Owned password/device secret buffers are transient and wiped on this path.
     struct wipe {ohno::MaintenanceRequest& r;~wipe(){if(!r.password.empty())SecureZeroMemory(r.password.data(),r.password.size());if(!r.device_key.empty())SecureZeroMemory(r.device_key.data(),r.device_key.size());}} cleanup{request};
     if(uninstall){
-        reg identity;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,KEY_READ,&identity.h)!=ERROR_SUCCESS)return false;
+        reg identity;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno\\Identity",0,KEY_READ,&identity.h)!=ERROR_SUCCESS){last_error_detail=L"未找到本机设备凭据；若设备尚未完成首次登记或状态损坏，请由管理员运行 --admin-recovery-remove。";return false;}
         secret_wide credentials;credentials.value=read_config_string(identity.h,L"Credentials");
-        const auto n=credentials.value.size();if(n<98||credentials.value[n-98]!=L':'||credentials.value[n-65]!=L':')return false;
-        for(std::size_t i=n-97;i<n;++i)if(i!=n-65&&!((credentials.value[i]>=L'0'&&credentials.value[i]<=L'9')||(credentials.value[i]>=L'a'&&credentials.value[i]<=L'f')))return false;
+        const auto n=credentials.value.size();if(n<98||credentials.value[n-98]!=L':'||credentials.value[n-65]!=L':'){last_error_detail=L"本机设备凭据损坏；请由管理员运行 --admin-recovery-remove。";return false;}
+        for(std::size_t i=n-97;i<n;++i)if(i!=n-65&&!((credentials.value[i]>=L'0'&&credentials.value[i]<=L'9')||(credentials.value[i]>=L'a'&&credentials.value[i]<=L'f'))){last_error_detail=L"本机设备凭据格式无效。";return false;}
         request.device_id.assign(credentials.value.begin()+static_cast<std::ptrdiff_t>(n-97),credentials.value.begin()+static_cast<std::ptrdiff_t>(n-65));
         request.device_key.assign(credentials.value.begin()+static_cast<std::ptrdiff_t>(n-64),credentials.value.end());
     }
     unsigned char nonce[32]{};if(BCryptGenRandom(nullptr,nonce,sizeof(nonce),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0)return false;
     constexpr char hex[]="0123456789abcdef";for(auto b:nonce){request.nonce+=hex[b>>4];request.nonce+=hex[b&15];}
-    if(!get_password(server,uninstall,request.password)){authorization_cancelled=!password_stdin;return false;}
+    if(supplied_password){
+        const int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,supplied_password->data(),static_cast<int>(supplied_password->size()),nullptr,0,nullptr,nullptr);
+        if(length<=0||length>512){last_error_detail=L"维护密码格式无效（需 12–128 字符）。";return false;}
+        request.password.resize(static_cast<std::size_t>(length));
+        if(!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,supplied_password->data(),static_cast<int>(supplied_password->size()),request.password.data(),length,nullptr,nullptr))return false;
+    }else if(!get_password(server,uninstall,request.password)){authorization_cancelled=!password_stdin;return false;}
     const auto result=ohno::authorize_maintenance(request);
-    if(result!=ohno::MaintenanceResult::Authorized){std::fwprintf(stderr,L"Teacher maintenance authorization failed; no install/remove changes made.\n");return false;}
+    if(result!=ohno::MaintenanceResult::Authorized){
+        switch(result){
+        case ohno::MaintenanceResult::Denied:
+            last_error_detail=L"教师维护授权被拒绝。请确认教师端网页已设置维护密码（12–128 字符，不是 4–8 位课堂 PIN）且输入正确。";break;
+        case ohno::MaintenanceResult::Unavailable:
+            last_error_detail=L"无法连接到教师端或证书验证失败（" + server + L"）。请检查教师端是否运行、防火墙是否放行 TCP 8443，以及教师端证书是否包含当前 IP/域名。";break;
+        default:
+            last_error_detail=L"教师端返回了无效的授权响应，请确认教师端与安装包版本一致。";break;
+        }
+        std::fwprintf(stderr,L"Teacher maintenance authorization failed; no install/remove changes made.\n");return false;
+    }
     return true;
 }
 bool register_uninstaller(const std::wstring& dir,const std::wstring& executable,bool& created){
@@ -160,23 +177,24 @@ bool is_administrator(){
     if(!AllocateAndInitializeSid(&authority,2,SECURITY_BUILTIN_DOMAIN_RID,DOMAIN_ALIAS_RID_ADMINS,0,0,0,0,0,0,&group))return false;
     const bool ok=CheckTokenMembership(nullptr,group,&member)!=FALSE;FreeSid(group);return ok&&member;
 }
-int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr,const std::string* release_key=nullptr){
-    if(!valid_url(url)){std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
-    sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)};if(!manager.h){std::fwprintf(stderr,L"Administrator access required (%lu)\n",GetLastError());return 1;}
-    sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){std::fwprintf(stderr,L"Service already exists.\n");return 1;}
-    sc legacy{OpenServiceW(manager.h,legacy_service_name,SERVICE_QUERY_STATUS)};if(legacy.h){std::fwprintf(stderr,L"Legacy OhnoPrototype service exists; uninstall it before installing Ohno.\n");return 1;}
-    reg prior;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&prior.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno registry key already exists.\n");return 1;}
-    reg prior_uninstall;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,uninstall_key,0,KEY_READ,&prior_uninstall.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno uninstall registration already exists.\n");return 1;}
+int install(const wchar_t* url,const wchar_t* certificate_path,const std::string* embedded_pem=nullptr,const std::string* release_key=nullptr,const std::wstring* supplied_password=nullptr){
+    last_error_detail.clear();
+    if(!valid_url(url)){last_error_detail=L"无效的 HTTPS 地址，示例：https://10.181.203.70:8443";std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
+    sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)};if(!manager.h){last_error_detail=L"需要管理员权限才能安装系统服务。";std::fwprintf(stderr,L"Administrator access required (%lu)\n",GetLastError());return 1;}
+    sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){last_error_detail=L"本机已安装 Ohno 服务，无需重复安装。如需重新配置请先卸载。";std::fwprintf(stderr,L"Service already exists.\n");return 1;}
+    sc legacy{OpenServiceW(manager.h,legacy_service_name,SERVICE_QUERY_STATUS)};if(legacy.h){last_error_detail=L"检测到旧版 OhnoPrototype 服务，请先卸载旧版后再安装新版 Ohno。";std::fwprintf(stderr,L"Legacy OhnoPrototype service exists; uninstall it before installing Ohno.\n");return 1;}
+    reg prior;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&prior.h)==ERROR_SUCCESS){last_error_detail=L"检测到残留注册表项 HKLM\\SOFTWARE\\Ohno，请先卸载旧安装。";std::fwprintf(stderr,L"Ohno registry key already exists.\n");return 1;}
+    reg prior_uninstall;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,uninstall_key,0,KEY_READ,&prior_uninstall.h)==ERROR_SUCCESS){last_error_detail=L"检测到已存在的卸载项，请先完成卸载。";std::fwprintf(stderr,L"Ohno uninstall registration already exists.\n");return 1;}
     std::string pem=embedded_pem?*embedded_pem:std::string{};
-    if(certificate_path&&!certificate_pem_from_file(certificate_path,pem)){std::fwprintf(stderr,L"Cannot read teacher public certificate.\n");return 1;}
-    if(!authorize(url,pem,false))return authorization_cancelled?2:1;
-    std::wstring dir=directory();if(dir.empty()||!create_program_directory(dir)){std::fwprintf(stderr,L"Cannot create program directory (%lu)\n",GetLastError());return 1;}
+    if(certificate_path&&!certificate_pem_from_file(certificate_path,pem)){last_error_detail=L"无法读取所选教师公开证书文件（需 PEM/CER/CRT 格式）。";std::fwprintf(stderr,L"Cannot read teacher public certificate.\n");return 1;}
+    if(!authorize(url,pem,false,supplied_password))return authorization_cancelled?2:1;
+    std::wstring dir=directory();if(dir.empty()||!create_program_directory(dir)){last_error_detail=L"无法创建程序目录 C:\\Program Files\\Ohno（可能存在旧目录残留）。";std::fwprintf(stderr,L"Cannot create program directory (%lu)\n",GetLastError());return 1;}
     std::wstring exe=dir+L"\\ohno-service.exe",helper=dir+L"\\ohno-request.exe",tun=dir+L"\\ohno-tun.exe",gpl=dir+L"\\sing-box-LICENSE.txt",wintun=dir+L"\\wintun-LICENSE.txt",shortcut;bool made_key=false;bool made_service=false;bool made_uninstaller=false;int result=1;
     const std::wstring maintenance=dir+L"\\ohno-maintenance.exe";
     do{
-        if(!CopyFileW(module_path().c_str(),maintenance.c_str(),TRUE)||!embedded_exe(exe,101)||!embedded_exe(helper,102)||!initial_payload(dir)){std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
+        if(!CopyFileW(module_path().c_str(),maintenance.c_str(),TRUE)||!embedded_exe(exe,101)||!embedded_exe(helper,102)||!initial_payload(dir)){last_error_detail=L"解压服务与运行文件失败，请检查磁盘空间或安全软件拦截。";std::fwprintf(stderr,L"Cannot extract service (%lu)\n",GetLastError());break;}
         reg config;DWORD disposition=0;
-        if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,nullptr,0,KEY_WRITE,nullptr,&config.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY){std::fwprintf(stderr,L"Cannot create configuration.\n");break;}
+        if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,nullptr,0,KEY_WRITE,nullptr,&config.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY){last_error_detail=L"无法写入注册表配置。";std::fwprintf(stderr,L"Cannot create configuration.\n");break;}
         made_key=true;
         DWORD layout=1;if(RegSetValueExW(config.h,L"PayloadLayout",0,REG_DWORD,reinterpret_cast<const BYTE*>(&layout),sizeof(layout))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot record managed payload layout.\n");break;}
         if(RegSetValueExW(config.h,L"ServerUrl",0,REG_SZ,reinterpret_cast<const BYTE*>(url),static_cast<DWORD>((wcslen(url)+1)*sizeof(wchar_t)))!=ERROR_SUCCESS){std::fwprintf(stderr,L"Cannot write configuration.\n");break;}
@@ -189,7 +207,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         // Do not expand machine-wide root trust just to reach this one server.
         std::wstring quoted=L"\""+exe+L"\"";
         sc svc{CreateServiceW(manager.h,service_name,L"Ohno Classroom Assistant",SERVICE_ALL_ACCESS,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,quoted.c_str(),nullptr,nullptr,nullptr,nullptr,nullptr)};
-        if(!svc.h){std::fwprintf(stderr,L"Cannot register service (%lu)\n",GetLastError());break;}
+        if(!svc.h){last_error_detail=L"注册 Windows 服务失败。";std::fwprintf(stderr,L"Cannot register service (%lu)\n",GetLastError());break;}
         made_service=true;
         SC_ACTION actions[]={{SC_ACTION_RESTART,3000},{SC_ACTION_RESTART,10000},{SC_ACTION_NONE,0}};
         SERVICE_FAILURE_ACTIONSW recovery{};recovery.dwResetPeriod=3600;recovery.cActions=3;recovery.lpsaActions=actions;
@@ -198,7 +216,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         // crashes still use the ordinary SCM recovery actions above.
         SERVICE_FAILURE_ACTIONS_FLAG failure_flag{};failure_flag.fFailureActionsOnNonCrashFailures=TRUE;
         if(!ChangeServiceConfig2W(svc.h,SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,&failure_flag)){std::fwprintf(stderr,L"Cannot configure reported-error recovery (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
-        if(!StartServiceW(svc.h,0,nullptr)){std::fwprintf(stderr,L"Cannot start service (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
+        if(!StartServiceW(svc.h,0,nullptr)){last_error_detail=L"服务已注册但启动失败。";std::fwprintf(stderr,L"Cannot start service (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
         std::wprintf(L"Ohno installed. Approve the device in the teacher UI.\n");result=0;
     }while(false);
     if(result){if(made_uninstaller)RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);DeleteFileW(maintenance.c_str());if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());ohno::remove_installed_payloads(dir);RemoveDirectoryW(dir.c_str());}
@@ -251,14 +269,30 @@ int wmain(int argc,wchar_t** argv){
     argc=static_cast<int>(args.size());argv=args.data();
 #ifndef OHNO_PAYLOAD_MAINTENANCE
     if(argc==1 || (argc==2&&std::wcscmp(argv[1],L"--install-bundled")==0)){
+        // If interactive double-click on an already-installed machine, offer direct uninstall.
+        if(argc==1&&!password_stdin){
+            reg existing_cfg;
+            if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&existing_cfg.h)==ERROR_SUCCESS){
+                const auto cur_server=read_config_string(existing_cfg.h,L"ServerUrl");
+                const std::wstring prompt=L"这台电脑已安装 Ohno 课堂助手。\r\n当前教师端："+(cur_server.empty()?L"未知":cur_server)+L"\r\n\r\n是否立即卸载 Ohno？（需要教师维护密码）";
+                if(MessageBoxW(nullptr,prompt.c_str(),L"Ohno 已安装",MB_YESNO|MB_ICONQUESTION)==IDYES){
+                    const int r=remove();
+                    if(r!=2)MessageBoxW(nullptr,r==0?L"Ohno 已卸载。":(last_error_detail.empty()?L"卸载失败，请检查维护密码与教师端网络。":last_error_detail.c_str()),
+                                        L"Ohno",MB_OK|(r==0?MB_ICONINFORMATION:MB_ICONERROR));
+                    return r;
+                }
+                return 0;
+            }
+        }
         ohno::SchoolBootstrap config;
         const auto result=ohno::read_school_bundle(config);
         if(result==ohno::BootstrapResult::Ready){
             const int code=install(config.server.c_str(),nullptr,&config.certificate_pem,&config.release_public_key);
-            if(argc==1&&!password_stdin&&code!=2)MessageBoxW(nullptr,
-                code==0?L"Ohno 已安装，服务已自动启动。请在教师端批准设备。":
-                L"Ohno 安装失败，请检查系统服务与程序目录，或联系学校 IT。",
-                L"Ohno 学生端",MB_OK|(code==0?MB_ICONINFORMATION:MB_ICONERROR));
+            if(argc==1&&!password_stdin&&code!=2){
+                const std::wstring msg=code==0?L"Ohno 已安装，服务已自动启动。请在教师端网页批准这台设备。":
+                    (last_error_detail.empty()?L"Ohno 安装失败，请检查维护密码、教师端网络和服务状态。":last_error_detail);
+                MessageBoxW(nullptr,msg.c_str(),L"Ohno 学生端",MB_OK|(code==0?MB_ICONINFORMATION:MB_ICONERROR));
+            }
             return code;
         }
         if(argc==2 || result==ohno::BootstrapResult::Invalid){
@@ -266,18 +300,29 @@ int wmain(int argc,wchar_t** argv){
                 L"Ohno",MB_OK|MB_ICONERROR);
             return 1;
         }
-        // Official generic download: a small native window, never a terminal.
-        // School-issued EXEs have the embedded configuration and skip this UI.
+        // Official generic download: unified DPI-aware setup wizard with auto-connect + fingerprint.
         return ohno::show_install_wizard(
-            [](const wchar_t* url,const wchar_t* cert)->int{return install(url,cert);});
+            [](const ohno::WizardInstallParams& params,std::wstring& err_out)->int{
+                const int code=install(
+                    params.server_url.c_str(),
+                    params.certificate_path.empty()?nullptr:params.certificate_path.c_str(),
+                    params.certificate_pem.empty()?nullptr:&params.certificate_pem,
+                    params.release_public_key.empty()?nullptr:&params.release_public_key,
+                    &params.password);
+                if(code!=0)err_out=last_error_detail;
+                return code;
+            });
     }
     if(argc==3&&std::wcscmp(argv[1],L"--install")==0)return install(argv[2],nullptr);
     if(argc==5&&std::wcscmp(argv[1],L"--install")==0&&std::wcscmp(argv[3],L"--certificate")==0)return install(argv[2],argv[4]);
 #endif
     if(argc==2&&std::wcscmp(argv[1],L"--remove")==0){
         const int result=remove();
-        if(!password_stdin&&result!=2)MessageBoxW(nullptr,result==0?(reboot_cleanup_pending?L"Ohno 已卸载。维护器自身文件将在重启后清理。":L"Ohno 已卸载。"):
-            L"未能卸载。请检查教师维护密码、教师端网络和设备登记。学校 OS 管理员可使用明确的恢复移除命令。",L"Ohno",MB_OK|(result==0?MB_ICONINFORMATION:MB_ICONERROR));
+        if(!password_stdin&&result!=2){
+            const std::wstring msg=result==0?(reboot_cleanup_pending?L"Ohno 已卸载。维护器自身文件将在重启后清理。":L"Ohno 已卸载。"):
+                (last_error_detail.empty()?L"未能卸载。请检查教师维护密码、教师端网络和设备登记。学校 OS 管理员可使用 --admin-recovery-remove。":last_error_detail);
+            MessageBoxW(nullptr,msg.c_str(),L"Ohno",MB_OK|(result==0?MB_ICONINFORMATION:MB_ICONERROR));
+        }
         return result;
     }
     if(argc==2&&!password_stdin&&std::wcscmp(argv[1],L"--admin-recovery-remove")==0)return remove(true);

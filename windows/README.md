@@ -9,9 +9,9 @@
 客户端全部采用 C++17 与原生 Win32 API 编写，按 `/MT` 静态链接运行库，目标机**不需要 Python、.NET 或 VC++ 再发行包**：
 
 - `ohno-service.exe`（固定 SCM 宿主，服务名 `Ohno`，安装于 `C:\Program Files\Ohno`）：管理单一受控工作进程树（Win10 Job Object）、持久更新事务与健康提交。
-- `ohno-worker.exe`（可替换版本化工作进程）：负责向教师端注册、轮询策略、进程/哈希监控、Edge 策略、实验性 WFP 出站限制、托管 `ohno-tun.exe`（sing-box 1.14.4 + Wintun）以及 `LocalSystem` 属主命名管道。
+- `ohno-worker.exe`（可替换版本化工作进程）：负责向教师端注册、轮询策略、多维进程特征识别（PE `VersionInfo` / Authenticode 签名者 / 窗口标题 / 哈希 / 文件名）与黑白名单双模式、Edge 黑/白名单策略、实验性 WFP 出站限制、托管 `ohno-tun.exe`（sing-box 1.14.4 + Wintun，支持黑/白名单路由）以及 `LocalSystem` 属主命名管道。
 - `ohno-request-launcher.exe` / `ohno-request.exe`：只读读取 `last_good` 版本并验证完整性后启动学生申请/课堂 PIN 窗口，后台线程执行可取消命名管道 I/O。
-- `ohno-maintenance.exe` / `ohno-setup.exe`：原生 Win32 安装与卸载入口。安装与正常卸载均在同连接验证教师公开证书后在线校验维护密码；离线或故障时，提权 OS 管理员可显式运行 `ohno-setup.exe --admin-recovery-remove`。
+- `ohno-maintenance.exe` / `ohno-setup.exe`：PerMonitorV2 高分屏原生 Win32 安装与卸载向导。支持输入教师端 IP 自动拉取证书并展示 SHA-256 指纹，同窗口在线校验维护密码；已安装时双击可直接卸载；离线或故障时，提权 OS 管理员可显式运行 `ohno-setup.exe --admin-recovery-remove`。
 
 ## 构建与打包顺序
 

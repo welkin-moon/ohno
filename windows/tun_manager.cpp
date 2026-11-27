@@ -29,8 +29,8 @@ bool TunManager::start(const std::string& config){
     if(status!=WAIT_TIMEOUT){stop_child();return false;}
     config_=config;return true;
 }
-bool TunManager::ensure(const std::vector<std::string>& blocked,const std::vector<std::string>& allowed){
-    std::string next;try{next=ohno::tun_config(blocked,allowed);}catch(...){return false;}
+bool TunManager::ensure(const std::vector<std::string>& domains,const std::vector<std::string>& allowed,bool whitelist_mode){
+    std::string next;try{next=ohno::tun_config_mode(whitelist_mode,domains,allowed);}catch(...){return false;}
     if(process_&&WaitForSingleObject(process_,0)==WAIT_TIMEOUT&&next==config_)return true;
     ULONGLONG now=GetTickCount64();if(last_attempt_&&now-last_attempt_<10000)return false;
     stop_child();last_attempt_=now;return start(next);
