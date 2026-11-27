@@ -7,7 +7,7 @@
 #include "update_runtime.hpp"
 #include "update_configuration.hpp"
 namespace {
-constexpr wchar_t service_name[] = L"OhnoPrototype";
+constexpr wchar_t service_name[] = L"Ohno";
 SERVICE_STATUS_HANDLE status_handle = nullptr;
 SERVICE_STATUS status_info{};
 HANDLE stop_event = nullptr;
@@ -58,7 +58,7 @@ void WINAPI service_main(DWORD, LPWSTR*) {
 int wmain() {
     SERVICE_TABLE_ENTRYW table[] = {{const_cast<LPWSTR>(service_name), service_main}, {nullptr, nullptr}};
     if (!StartServiceCtrlDispatcherW(table)) {
-        std::fwprintf(stderr, L"Start the prototype through the Windows service manager. Error %lu\n", GetLastError());
+        std::fwprintf(stderr, L"Start ohno-service through the Windows service manager. Error %lu\n", GetLastError());
         return 1;
     }
     return 0;

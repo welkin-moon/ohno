@@ -25,13 +25,17 @@
 #pragma comment(lib,"crypt32.lib")
 #pragma comment(lib,"bcrypt.lib")
 namespace {
-constexpr wchar_t service_name[]=L"OhnoPrototype";
-constexpr wchar_t uninstall_key[]=L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OhnoPrototype";
+#ifndef OHNO_VERSION_WIDE
+#define OHNO_VERSION_WIDE L"1.0.0"
+#endif
+constexpr wchar_t service_name[]=L"Ohno";
+constexpr wchar_t legacy_service_name[]=L"OhnoPrototype";
+constexpr wchar_t uninstall_key[]=L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ohno";
 bool password_stdin=false,reboot_cleanup_pending=false,authorization_cancelled=false;
 struct secret_wide {std::wstring value;~secret_wide(){if(!value.empty())SecureZeroMemory(value.data(),value.size()*sizeof(wchar_t));}};
 struct sc {SC_HANDLE h=nullptr;~sc(){if(h)CloseServiceHandle(h);}};
 struct reg {HKEY h=nullptr;~reg(){if(h)RegCloseKey(h);}};
-std::wstring directory(){PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,0,nullptr,&raw)))return {};std::wstring p=raw;CoTaskMemFree(raw);return p+L"\\OhnoPrototype";}
+std::wstring directory(){PWSTR raw=nullptr;if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles,0,nullptr,&raw)))return {};std::wstring p=raw;CoTaskMemFree(raw);return p+L"\\Ohno";}
 bool create_program_directory(const std::wstring& path){
     PSECURITY_DESCRIPTOR descriptor=nullptr;
     if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)",SDDL_REVISION_1,&descriptor,nullptr))return false;
@@ -146,7 +150,7 @@ bool register_uninstaller(const std::wstring& dir,const std::wstring& executable
     reg key;DWORD disposition=0;
     if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,uninstall_key,0,nullptr,0,KEY_WRITE,nullptr,&key.h,&disposition)!=ERROR_SUCCESS||disposition!=REG_CREATED_NEW_KEY)return false;
     created=true;DWORD yes=1;
-    return write_config(key.h,L"DisplayName",L"Ohno classroom assistant")&&write_config(key.h,L"Publisher",L"Ohno")&&
+    return write_config(key.h,L"DisplayName",L"Ohno Classroom Assistant")&&write_config(key.h,L"DisplayVersion",OHNO_VERSION_WIDE)&&write_config(key.h,L"Publisher",L"Ohno")&&
         write_config(key.h,L"InstallLocation",dir)&&write_config(key.h,L"UninstallString",L"\""+executable+L"\" --remove")&&
         RegSetValueExW(key.h,L"NoModify",0,REG_DWORD,reinterpret_cast<const BYTE*>(&yes),sizeof(yes))==ERROR_SUCCESS&&
         RegSetValueExW(key.h,L"NoRepair",0,REG_DWORD,reinterpret_cast<const BYTE*>(&yes),sizeof(yes))==ERROR_SUCCESS;
@@ -160,6 +164,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
     if(!valid_url(url)){std::fwprintf(stderr,L"Expected an HTTPS origin, e.g. https://teacher.example:8443\n");return 2;}
     sc manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)};if(!manager.h){std::fwprintf(stderr,L"Administrator access required (%lu)\n",GetLastError());return 1;}
     sc existing{OpenServiceW(manager.h,service_name,SERVICE_QUERY_STATUS)};if(existing.h){std::fwprintf(stderr,L"Service already exists.\n");return 1;}
+    sc legacy{OpenServiceW(manager.h,legacy_service_name,SERVICE_QUERY_STATUS)};if(legacy.h){std::fwprintf(stderr,L"Legacy OhnoPrototype service exists; uninstall it before installing Ohno.\n");return 1;}
     reg prior;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&prior.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno registry key already exists.\n");return 1;}
     reg prior_uninstall;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,uninstall_key,0,KEY_READ,&prior_uninstall.h)==ERROR_SUCCESS){std::fwprintf(stderr,L"Ohno uninstall registration already exists.\n");return 1;}
     std::string pem=embedded_pem?*embedded_pem:std::string{};
@@ -183,7 +188,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         // All managed transports authenticate against the saved public pin.
         // Do not expand machine-wide root trust just to reach this one server.
         std::wstring quoted=L"\""+exe+L"\"";
-        sc svc{CreateServiceW(manager.h,service_name,L"ohno prototype",SERVICE_ALL_ACCESS,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,quoted.c_str(),nullptr,nullptr,nullptr,nullptr,nullptr)};
+        sc svc{CreateServiceW(manager.h,service_name,L"Ohno Classroom Assistant",SERVICE_ALL_ACCESS,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,quoted.c_str(),nullptr,nullptr,nullptr,nullptr,nullptr)};
         if(!svc.h){std::fwprintf(stderr,L"Cannot register service (%lu)\n",GetLastError());break;}
         made_service=true;
         SC_ACTION actions[]={{SC_ACTION_RESTART,3000},{SC_ACTION_RESTART,10000},{SC_ACTION_NONE,0}};
@@ -194,7 +199,7 @@ int install(const wchar_t* url,const wchar_t* certificate_path,const std::string
         SERVICE_FAILURE_ACTIONS_FLAG failure_flag{};failure_flag.fFailureActionsOnNonCrashFailures=TRUE;
         if(!ChangeServiceConfig2W(svc.h,SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,&failure_flag)){std::fwprintf(stderr,L"Cannot configure reported-error recovery (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
         if(!StartServiceW(svc.h,0,nullptr)){std::fwprintf(stderr,L"Cannot start service (%lu)\n",GetLastError());DeleteService(svc.h);made_service=false;break;}
-        std::wprintf(L"Prototype installed. Approve the device in the teacher UI.\n");result=0;
+        std::wprintf(L"Ohno installed. Approve the device in the teacher UI.\n");result=0;
     }while(false);
     if(result){if(made_uninstaller)RegDeleteTreeW(HKEY_LOCAL_MACHINE,uninstall_key);DeleteFileW(maintenance.c_str());if(made_service){sc svc{OpenServiceW(manager.h,service_name,DELETE)};if(svc.h)DeleteService(svc.h);}if(made_key){reg cfg;bool ok=true;if(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno",0,KEY_READ,&cfg.h)==ERROR_SUCCESS)ok=remove_imported_certificate(cfg.h);if(ok)RegDeleteTreeW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Ohno");else std::fwprintf(stderr,L"Certificate cleanup failed; registry record retained.\n");}remove_shortcut(shortcut,helper);DeleteFileW(wintun.c_str());DeleteFileW(gpl.c_str());DeleteFileW(tun.c_str());DeleteFileW(helper.c_str());DeleteFileW(exe.c_str());ohno::remove_installed_payloads(dir);RemoveDirectoryW(dir.c_str());}
     return result;
