@@ -16,7 +16,7 @@ inline std::uint32_t le32(const unsigned char* p) {
     return std::uint32_t(p[0]) | (std::uint32_t(p[1])<<8) |
            (std::uint32_t(p[2])<<16) | (std::uint32_t(p[3])<<24);
 }
-// Parse the end of an EXE produced by teacher/school_installer.py. A generic
+// Parse the end of an EXE produced by teacher/installer.go. A generic
 // installer has no trailer and invokes the normal graphical setup screen.
 inline BootstrapResult decode_school_bundle(const std::string& tail, SchoolBootstrap& config) {
     if(tail.size()<16)return BootstrapResult::Missing;

@@ -1,10 +1,21 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -pedantic -O2
-.PHONY: all test clean
-all: ohno-sim
+GO ?= go
+VERSION := $(shell cat VERSION)
+
+.PHONY: all teacher pkg test test-cpp test-go test-js test-parity check-no-python clean
+
+all: ohno-sim ohno-teacher ohno-pkg
 
 ohno-sim: src/main.cpp src/policy.cpp src/policy.hpp
 	$(CXX) $(CXXFLAGS) -Isrc src/main.cpp src/policy.cpp -o $@
+
+ohno-teacher:
+	$(GO) build -trimpath -ldflags="-s -w -X main.Version=v$(VERSION)" -o $@ ./cmd/ohno-teacher
+
+ohno-pkg:
+	$(GO) build -trimpath -ldflags="-s -w" -o $@ ./cmd/ohno-pkg
+
 policy-test: tests/policy_test.cpp src/policy.cpp src/policy.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/policy_test.cpp src/policy.cpp -o $@
 json-test: tests/json_test.cpp src/json.hpp
@@ -29,7 +40,11 @@ update-package-test: tests/update_package_test.cpp src/update_package.hpp src/up
 	$(CXX) $(CXXFLAGS) -Isrc tests/update_package_test.cpp -o $@
 update-health-test: tests/update_health_test.cpp src/update_health.hpp src/agent_health.hpp src/update_transaction.hpp
 	$(CXX) $(CXXFLAGS) -Isrc tests/update_health_test.cpp -o $@
-test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test
+
+check-no-python:
+	@if [ -n "$$(find . -name '*.py' -not -path './.git/*')" ]; then echo "Python files are forbidden in this repository" >&2; exit 1; fi
+
+test-cpp: policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test
 	./policy-test
 	./json-test
 	./smbios-test
@@ -42,5 +57,17 @@ test: policy-test json-test smbios-test tun-config-test mac-identity-test setup-
 	./update-transaction-test
 	./update-package-test
 	./update-health-test
+
+test-go:
+	$(GO) test -race -v ./teacher/...
+
+test-parity: update-package-test
+	OHNO_UPDATE_PACKAGE_TEST="$(CURDIR)/update-package-test" $(GO) test -v ./tests/integration
+
+test-js:
+	node tests/update_ui_test.js
+
+test: check-no-python test-cpp test-go test-parity test-js
+
 clean:
-	rm -f ohno-sim policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test
+	rm -f ohno-sim ohno-teacher ohno-pkg policy-test json-test smbios-test tun-config-test mac-identity-test setup-bundle-test client-policy-test approval-queue-test update-manifest-test update-transaction-test update-package-test update-health-test

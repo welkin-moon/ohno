@@ -1,42 +1,33 @@
-# ohno 教师端（开发中）
+# ohno 教师端（Go 原生实现）
 
+教师端使用 Go 1.24 标准库编写，零第三方依赖、零 Python 运行时，编译为单文件原生可执行程序（Windows `ohno-teacher.exe` / Linux `ohno-teacher`）。
 
-当前教师端已经接入学生客户端。管理面和设备 API 明确分离：
+管理面与学生 API 严格分离：
 
-- 本机管理：`http://127.0.0.1:8765`，只监听 loopback，无登录密码；用随机 CSRF token 防止浏览器跨站盲提交。
-- 学生 API：`https://<teacher-host>:8443`，局域网可达，只提供注册、策略、申请和可选 PIN 解锁 API，不暴露教师管理页面。
+- **本机管理**：`http://127.0.0.1:8765`，仅监听 loopback 并校验 `Host` 头，无登录密码，使用随机 CSRF token 防止跨站提交。
+- **学生 API**：`https://<teacher-host>:8443`，局域网可达，仅提供设备注册、策略、申请、可选 PIN 解锁、维护授权与托管升级 API，不暴露管理页面。
 
-Windows 双击 `ohno-teacher.exe` 后会自动初始化状态与 HTTPS 证书、启动两个监听口，并打开本机管理页。教师在页面中直接管理规则、批准设备、审核申请和下载本校专属 `Ohno-School-Setup.exe`，不需要记任何后台密码。
+## 直接运行
 
-学生端现场临时解锁是独立的可选功能：教师可以在本机管理页设置 4–8 位数字 PIN；默认关闭。PIN 只用于学生机暂停限制 1 小时，采用盐化 PBKDF2 哈希保存，并有失败频率限制；它不是后台登录凭据。
+Windows 发行版 `ohno-teacher.exe` 已内嵌 `ohno-setup.exe` 与 `update_ui.js`，双击即可自动在 `%LOCALAPPDATA%\OhnoTeacher` 初始化证书和 `state.json` 并打开浏览器管理页。
 
-教师电脑需让 TCP 8443 对学生网段可达，并保证主机名可解析。8765 只绑定 127.0.0.1，不应配置端口映射或防火墙放行到局域网。
+命令行显式运行（Windows / Linux 通用）：
 
-从源码运行需要 Python 3.10+ 和 requirements.txt 中的 cryptography。Windows 原型已验证可打包为单文件程序，目标机器无需另装 Python。
-
-初始化与运行：
-
-```
-python -m pip install -r requirements.txt
-python server.py --generate-certificate --host teacher.example --cert cert.pem --key key.pem
-python server.py --state state.json --init
-python server.py --state state.json --cert cert.pem --key key.pem --bind 0.0.0.0 --port 8443 --control-port 8765
+```bash
+go build -o ohno-teacher ./cmd/ohno-teacher
+./ohno-teacher --generate-certificate --host teacher.example --cert cert.pem --key key.pem
+./ohno-teacher --state state.json --init
+./ohno-teacher --state state.json --cert cert.pem --key key.pem --bind 0.0.0.0 --port 8443 --control-port 8765 --host teacher.example
 ```
 
-可用上述命令生成自签证书，主机名须与客户端连接地址相符；学生端仍必须信任该证书。将自签证书加入系统信任会影响整台机器的信任范围，部署前须由学校 IT 审核，私钥只留在教师服务器。`state.json` 和私钥须只允许服务管理员读取，备份时同样保护。默认只监听本机；需要在局域网访问时，明确设置 `--bind`，并限制防火墙访问范围。不要将状态或密钥提交到仓库。
+## 维护授权与发布信任
 
-API 文档尚在开发中；单元和集成测试通过 `python -m unittest discover -s teacher` 运行。尚未验证并发压力、Windows 打包及全部安全边界，不要在真实学校环境部署。
+- **教师维护密码**：仅用于学生机正常安装/卸载（PBKDF2-HMAC-SHA256 600,000 轮），与日常管理、镜像开机及可选 4–8 位课堂 PIN 完全分离。
+- **本校发布信任**：在本地页面点击“初始化本校发布信任”，在状态文件旁创建受保护的 `<状态名>.releases` 目录（POSIX `0700` / Windows 受保护 DACL 仅允许当前用户、SYSTEM 与 Administrators）并生成独立 P-256 签名密钥。
+- **包构建器**：使用 `go build ./cmd/ohno-pkg` 编译 `ohno-pkg`，构建未签名的 `OHNOPK01` 更新包，随后在教师端页面验证并签名批准。
 
-## 安装 / 卸载维护授权（当前源码）
+## 测试
 
-本机页面可单独设置教师维护密码，仅用于正常新增安装 / 卸载。配套新构建的原生安装器会先核实教师 HTTPS 身份，再请求在线授权；密码未设置、已停用、拒绝、离线或证书不匹配均不会开始安装 / 卸载。支持 12–128 字符的长口令，不要求大小写或符号组合。日常管理、设备登记和镜像启动不新增登录。口令验证记录只留教师端，不进入安装包或镜像；短课堂 PIN 保持独立。
-
-**已发布 alpha.6 旧安装器不具备此入口保护**，需配套当前源码构建，不能仅设置服务端密码就认为旧程序受保护。卸载可从 Windows 应用列表进入；离线或状态损坏时，OS 管理员仍有明确的恢复移除入口。协议、TLS 边界和后续升级工作见 [托管升级设计](../docs/managed-updates.md)。
-
-## 教师批准更新包（当前源码；客户端自动拉取接入中）
-
-本机页面可明确“初始化本校发布信任”，生成与 HTTPS 独立的 P-256 发布密钥，位于状态文件旁的 `<状态名>.releases`。这不是后台登录，也不重复要求维护密码。初始没有任何批准版本。教师选择本地 `.ohno` 包并点击“验证并批准此包”，服务器检查固定文件组 / x64 架构 / 版本，持久化不可变包后以递增序号签名发布；不自动拉取或信任 GitHub latest。“暂停下发与执行授权”立即拒绝新的拉取 / 执行许可。
-
-只有已经批准且 MAC 仍匹配的设备，以自身独立密钥调用 HTTPS API，才能读取当前清单、对应哈希的包及新 nonce 绑定的执行许可。已经下载的字节无法撤回，所以客户端还须在切换前复核当时的执行授权。网络失败或取消上传的结果可能不确定；页面要求刷新确认当前状态，不能宣称取消必然撤销已经提交的批准。
-
-发布目录必须与教师状态 / TLS 私钥一样由 OS 权限限制到教师账户及管理员。签名私钥、口令验证记录绝不能放入客户端镜像。备份原签名身份；目录残缺、签名损坏或写入结果不确定时失败关闭，不自动换一把密钥。代码及 CI 只用临时 fixture，不代表已经配置生产学校身份。当前客户端尚未自动消费这些端点，不要把“服务器已批准”当作“客户端已升级”。
+```bash
+go test -race -v ./teacher/...
+```
