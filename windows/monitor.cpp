@@ -91,7 +91,7 @@ void read_pe_version_info(const std::wstring& path,ohno::ProcessFeatures& out){
 }
 std::string read_authenticode_signer(const std::wstring& path){
     HCERTSTORE store=nullptr;HCRYPTMSG msg=nullptr;
-    if(!CryptQueryObject(CERT_QUERY_OBJECT_FILE,path.c_str(),CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBEDDED,
+    if(!CryptQueryObject(CERT_QUERY_OBJECT_FILE,path.c_str(),CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
                          CERT_QUERY_FORMAT_FLAG_BINARY,0,nullptr,nullptr,nullptr,&store,&msg,nullptr))
         return {};
     std::string signer;
