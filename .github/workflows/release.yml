@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: false
       - name: Test Go teacher service
         run: go test -race -v ./teacher/...
       - name: Test C++17 policy and update core
@@ -51,6 +52,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: false
       - name: Verify native command exit gates include crash statuses
         shell: cmd
         run: go test -v ./tests/integration -run TestWindowsCmdExitGate
@@ -286,7 +288,9 @@ jobs:
         run: go test -v ./teacher/...
       - name: Compare Go and native package parsers on Windows
         shell: cmd
-        run: set OHNO_UPDATE_PACKAGE_TEST=%CD%\update-package-test.exe && go test -v ./tests/integration -run TestUpdatePackageParity
+        env:
+          OHNO_UPDATE_PACKAGE_TEST: ${{ github.workspace }}\update-package-test.exe
+        run: go test -v ./tests/integration -run TestUpdatePackageParity
       - name: Exercise native journal crash recovery in temporary NTFS directories
         shell: cmd
         run: go test -v ./tests/integration -run TestWindowsUpdateJournal
@@ -310,10 +314,14 @@ jobs:
         run: go test -v ./tests/integration -run TestWindowsSetupAuthorization
       - name: Verify Edge domain policy
         shell: cmd
-        run: set OHNO_RUN_EDGE_PROBE=1 && go test -v ./tests/integration -run TestWindowsEdgePolicyProbe
+        env:
+          OHNO_RUN_EDGE_PROBE: '1'
+        run: go test -v ./tests/integration -run TestWindowsEdgePolicyProbe
       - name: Exercise native teacher and managed Windows service end-to-end
         shell: cmd
-        run: set OHNO_RUN_E2E=1 && go test -v -timeout 25m ./tests/integration -run TestWindowsEndToEnd
+        env:
+          OHNO_RUN_E2E: '1'
+        run: go test -v -timeout 25m ./tests/integration -run TestWindowsEndToEnd
       - name: Upload Windows client release artifacts
         uses: actions/upload-artifact@v4
         with:
